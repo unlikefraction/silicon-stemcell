@@ -1,0 +1,21 @@
+venv/
+env.py
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Telegram state (contains user IDs)
+core/telegram/state.json
+
+# Worker outputs (generated at runtime)
+worker/outputs/*.txt
+worker/outputs/_active_workers.json
+worker/outputs/_browser_queue.json
+
+# Session files (generated at runtime)
+sessions/
+
+# Runtime state
+.restart_pending
