@@ -104,7 +104,9 @@ def get_manager_prompt(carbon_id):
     contact = _get_contact_info(carbon_id)
     trust_level = contact.get("trust_level", "very_low") if contact else "very_low"
 
-    parts = [
+    parts = []
+
+    parts.extend([
         _read_prompt("DNA.py"),
         _read_prompt("SOUL.md"),
         _read_prompt("SILICON.md"),
@@ -112,7 +114,7 @@ def get_manager_prompt(carbon_id):
         _read_prompt("CONTACTS.md"),
         # f"## Current Contacts\n{_get_contacts_summary()}",
         _read_prompt(f"trust/{trust_level}.md"),
-    ]
+    ])
 
     # Load per-carbon memory file
     carbon_memory_path = os.path.join(PROMPTS_DIR, "memory", "people", f"{carbon_id}.md")
@@ -128,6 +130,11 @@ def get_manager_prompt(carbon_id):
 
     # Add carbon_id context
     parts.append(f"\n## Current Session\nYou are talking to carbon_id: {carbon_id}\nTheir trust level: {trust_level}")
+
+    # Load BOOT.md if it exists
+    boot_path = os.path.join(PROMPTS_DIR, "BOOT.md")
+    if os.path.exists(boot_path):
+        parts.append(_read_prompt("BOOT.md"))
 
     return "\n\n".join(p for p in parts if p)
 

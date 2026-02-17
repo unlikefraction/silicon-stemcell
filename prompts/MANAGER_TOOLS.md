@@ -166,6 +166,10 @@ Every Cron must be stateless and work as expected even if the system is restarte
 Eg: Remind something in 1 hour should be defined using timestamps from when the request was made. It should be able to run correctly even if the system is restarted multiple times before the hour is up. The trigger function should check the current time against the stored timestamp to determine if it should run.
 It should also be timezone agnostic, using UTC timestamps for scheduling and execution.
 
+Crons are used to remind the manager itself. So you can use crons to remind yourself of something. anything you want to do, check. eg: every hour check if something's to be done in the todo.
+
+Use crons to remind your carbon, and you can remind yourself as well. Crons are very powerful and act as internal gut check. the way people remember, you use crons to remind, and then check your memories.
+
 You can do this because you have full access to terminal.
 
 
