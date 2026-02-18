@@ -12,6 +12,10 @@ ACTIVE_FILE = os.path.join(OUTPUTS_DIR, "_active_workers.json")
 BROWSER_QUEUE_FILE = os.path.join(OUTPUTS_DIR, "_browser_queue.json")
 ARCHIVE_META_FILE = os.path.join(OUTPUTS_DIR, "_archive_meta.json")
 
+WORKER_DIR = os.path.dirname(os.path.abspath(__file__))
+AGENT_BROWSER_PROFILE_DIR = os.path.join(WORKER_DIR, "profiles", "silicon")
+AGENT_BROWSER_PROFILE_SESSION = "silicon"
+
 
 # --- State persistence ---
 
@@ -60,16 +64,30 @@ def _output_path(worker_id):
 
 # --- Internal helpers ---
 
-def _is_browser_worker_active():
-    """Check if any browser worker is currently running."""
+def _is_profiled_browser_active():
+    """Check if a profiled (non-incognito) browser worker is currently running."""
     active = _load_active()
     for info in active.values():
-        if info.get("worker_type") == "browser":
+        if info.get("worker_type") == "browser" and not info.get("incognito", False):
             return True
     return False
 
 
-def _launch_worker_process(worker_id, task, worker_type, carbon_id):
+def _cleanup_agent_browser_session(worker_id, worker_info):
+    """Close the agent-browser daemon session after an incognito browser worker finishes."""
+    if worker_info.get("worker_type") != "browser":
+        return
+    if worker_info.get("incognito", False):
+        try:
+            subprocess.run(
+                ["agent-browser", "--session", f"incognito-{worker_id}", "close"],
+                capture_output=True, timeout=10,
+            )
+        except Exception:
+            pass
+
+
+def _launch_worker_process(worker_id, task, worker_type, carbon_id, incognito=False):
     """Actually launch the claude process for a worker. Returns status string."""
     os.makedirs(OUTPUTS_DIR, exist_ok=True)
     output_path = _output_path(worker_id)
@@ -78,7 +96,7 @@ def _launch_worker_process(worker_id, task, worker_type, carbon_id):
     if err:
         return err
 
-    prompt_flag = "--system-prompt" if worker_type == "writer" else "--append-system-prompt"
+    prompt_flag = "--append-system-prompt" if worker_type == "terminal" else "--system-prompt"
 
     cmd = [
         "claude", "-p",
@@ -88,11 +106,17 @@ def _launch_worker_process(worker_id, task, worker_type, carbon_id):
         "--verbose",
     ]
 
-    # Only browser workers get --chrome
-    if worker_type == "browser":
-        cmd.append("--chrome")
-
     cmd.append(task)
+
+    # Set up environment for agent-browser
+    env = os.environ.copy()
+    if worker_type == "browser":
+        if incognito:
+            env["AGENT_BROWSER_SESSION"] = f"incognito-{worker_id}"
+        else:
+            os.makedirs(AGENT_BROWSER_PROFILE_DIR, exist_ok=True)
+            env["AGENT_BROWSER_SESSION"] = AGENT_BROWSER_PROFILE_SESSION
+            env["AGENT_BROWSER_PROFILE"] = AGENT_BROWSER_PROFILE_DIR
 
     output_file = open(output_path, "w")
     process = subprocess.Popen(
@@ -100,6 +124,7 @@ def _launch_worker_process(worker_id, task, worker_type, carbon_id):
         stdout=output_file,
         stderr=subprocess.PIPE,
         preexec_fn=os.setsid,
+        env=env,
     )
 
     active = _load_active()
@@ -110,16 +135,18 @@ def _launch_worker_process(worker_id, task, worker_type, carbon_id):
         "worker_type": worker_type,
         "carbon_id": carbon_id,
         "output_path": output_path,
+        "incognito": incognito,
     }
     _save_active(active)
 
-    return f"Done. Worker '{worker_id}' ({worker_type}) started (pid: {process.pid})"
+    mode = "incognito" if incognito else "profiled"
+    return f"Done. Worker '{worker_id}' ({worker_type}, {mode}) started (pid: {process.pid})"
 
 
 def _process_browser_queue():
-    """If no browser worker is active, start the next one from the queue.
+    """If no profiled browser worker is active, start the next one from the queue.
     Returns (result_string_or_None, carbon_id_or_None)."""
-    if _is_browser_worker_active():
+    if _is_profiled_browser_active():
         return None, None
 
     queue = _load_browser_queue()
@@ -144,8 +171,8 @@ def _process_browser_queue():
 
 # --- Public API: starting workers ---
 
-def start_browser_worker(worker_id, task, carbon_id):
-    """Start a browser worker. Queued if another browser worker is active."""
+def start_browser_worker(worker_id, task, carbon_id, incognito=False):
+    """Start a browser worker. Profiled workers queue; incognito workers run immediately."""
     os.makedirs(OUTPUTS_DIR, exist_ok=True)
     output_path = _output_path(worker_id)
 
@@ -156,16 +183,19 @@ def start_browser_worker(worker_id, task, carbon_id):
     if worker_id in active:
         return f"Error: Worker '{worker_id}' is already active."
 
-    # Check if already in queue
+    # Incognito workers run immediately in parallel — no queuing
+    if incognito:
+        return _launch_worker_process(worker_id, task, "browser", carbon_id, incognito=True)
+
+    # --- Profiled worker: queue if another profiled browser is active ---
     queue = _load_browser_queue()
     if any(q["worker_id"] == worker_id for q in queue):
         return f"Error: Worker '{worker_id}' is already in the browser queue."
 
-    # If no browser worker is running, start immediately
-    if not _is_browser_worker_active():
-        return _launch_worker_process(worker_id, task, "browser", carbon_id)
+    if not _is_profiled_browser_active():
+        return _launch_worker_process(worker_id, task, "browser", carbon_id, incognito=False)
 
-    # Otherwise queue it
+    # Queue it
     queue.append({
         "worker_id": worker_id,
         "task": task,
@@ -175,7 +205,7 @@ def start_browser_worker(worker_id, task, carbon_id):
     _save_browser_queue(queue)
 
     position = len(queue)
-    return f"Done. Worker '{worker_id}' (browser) queued at position {position}. Will start when current browser worker finishes."
+    return f"Done. Worker '{worker_id}' (browser) queued at position {position}. Will start when current profiled browser worker finishes."
 
 
 def start_terminal_worker(worker_id, task, carbon_id):
@@ -208,14 +238,14 @@ def start_writer_worker(worker_id, task, carbon_id):
     return _launch_worker_process(worker_id, task, "writer", carbon_id)
 
 
-def start_worker(worker_id, task, worker_type, carbon_id):
+def start_worker(worker_id, task, worker_type, carbon_id, incognito=False):
     """Route to the correct worker start function based on type."""
     if not worker_type:
         return "Error: worker_type is required. Available types: browser, terminal, writer"
 
     worker_type = worker_type.lower()
     if worker_type == "browser":
-        return start_browser_worker(worker_id, task, carbon_id)
+        return start_browser_worker(worker_id, task, carbon_id, incognito=incognito)
     elif worker_type == "terminal":
         return start_terminal_worker(worker_id, task, carbon_id)
     elif worker_type == "writer":
@@ -302,6 +332,9 @@ def stop_worker(worker_id, carbon_id):
     except (OSError, ProcessLookupError):
         pass
 
+    # Clean up agent-browser session for incognito workers
+    _cleanup_agent_browser_session(worker_id, worker_info)
+
     del active[worker_id]
     _save_active(active)
 
@@ -319,7 +352,7 @@ def stop_worker(worker_id, carbon_id):
         os.rename(output_path, archive_path)
 
         meta = _load_archive_meta()
-        meta[archive_id] = {"carbon_id": carbon_id, "worker_type": worker_type, "archived_at": timestamp}
+        meta[archive_id] = {"carbon_id": carbon_id, "worker_type": worker_type, "task": worker_info.get("task", ""), "archived_at": timestamp}
         _save_archive_meta(meta)
 
         return f"Done. Worker '{worker_id}' stopped. Output archived as '{archive_id}'"
@@ -435,8 +468,11 @@ def check_completed_workers():
         worker_type = active[worker_id].get("worker_type", "unknown")
         carbon_id = active[worker_id].get("carbon_id", "unknown")
 
-        if worker_type == "browser":
+        if worker_type == "browser" and not active[worker_id].get("incognito", False):
             had_browser_completion = True
+
+        # Clean up agent-browser session for incognito workers
+        _cleanup_agent_browser_session(worker_id, active[worker_id])
 
         # Worker is done - read and archive
         result_text = ""
@@ -455,6 +491,7 @@ def check_completed_workers():
             meta[archive_id] = {
                 "carbon_id": carbon_id,
                 "worker_type": worker_type,
+                "task": active[worker_id].get("task", ""),
                 "archived_at": timestamp,
             }
             meta_changed = True

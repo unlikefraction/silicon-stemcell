@@ -3,6 +3,7 @@ import sys
 import os
 import json
 import shutil
+import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Ensure project root is in path
@@ -194,7 +195,8 @@ def execute_single_tool(tool_spec, carbon_id):
             if not worker_type:
                 return "Tool 'worker/new': Error: worker_type is required. Use worker/browser, worker/terminal, or worker/writer"
             task = tool_spec.get("task", "")
-            status = start_worker(worker_id, task, worker_type, carbon_id)
+            incognito = tool_spec.get("incognito", False)
+            status = start_worker(worker_id, task, worker_type, carbon_id, incognito=incognito)
 
             # Handle checkback_in if specified
             checkback_in = tool_spec.get("checkback_in")
@@ -499,5 +501,39 @@ def main():
         time.sleep(LOOP_TICK)
 
 
+def run_headed_browser():
+    """Open a headed browser with the silicon profile for manual login."""
+    from worker.handler import AGENT_BROWSER_PROFILE_DIR, AGENT_BROWSER_PROFILE_SESSION
+    os.makedirs(AGENT_BROWSER_PROFILE_DIR, exist_ok=True)
+
+    log(f"[Silicon] Opening headed browser with silicon profile at: {AGENT_BROWSER_PROFILE_DIR}")
+    log("[Silicon] Log into any services you need. Press Ctrl+C when done.")
+    log("")
+
+    try:
+        subprocess.run([
+            "agent-browser",
+            "--session", AGENT_BROWSER_PROFILE_SESSION,
+            "--profile", AGENT_BROWSER_PROFILE_DIR,
+            "--headed",
+            "open", "https://google.com",
+        ])
+        log("[Silicon] Browser open. Log into your services, then press Ctrl+C to save and close.")
+        # Keep alive until user presses Ctrl+C
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        log("\n[Silicon] Closing browser and saving profile...")
+        subprocess.run([
+            "agent-browser",
+            "--session", AGENT_BROWSER_PROFILE_SESSION,
+            "close",
+        ], capture_output=True)
+        log("[Silicon] Profile saved. Login state persisted for browser workers.")
+
+
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "browser":
+        run_headed_browser()
+    else:
+        main()
