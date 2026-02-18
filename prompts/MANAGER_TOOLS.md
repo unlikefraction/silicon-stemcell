@@ -84,6 +84,55 @@ To message any other carbon, you MUST use the message_manager tool.
 
 Style: Dont sent long messages. Send many small and readable messages. And definietly do not spam. So know when to break the message into many parts and when to write it as one.
 
+#### Rich media inside reply
+You can embed files and voice messages directly inside your reply message using inline syntax:
+
+**Send a file (photo/video/audio/document — auto-detected by extension):**
+`[file=/absolute/path/to/file.jpg]`
+
+**Send a voice message (text-to-speech, sent as voice bubble):**
+`[voice=whatever you want to say out loud to your carbon]`
+
+The message is split into segments around these blocks. Everything before a block is sent as text first, then the media, then the remaining text, and so on — in the exact order you write them.
+
+Example:
+```
+check out this photo
+[file=/path/to/screenshot.png]
+did you like it?
+[voice=hey, i can also talk to you now!]
+pretty cool right?
+```
+This sends 5 things in order:
+1. Text: "check out this photo"
+2. Photo: screenshot.png
+3. Text: "did you like it?"
+4. Voice bubble: TTS of "hey, i can also talk to you now!"
+5. Text: "pretty cool right?"
+
+If a [file=...] or [voice=...] can't be parsed (eg weird nested brackets), it's left as plain text — nothing breaks.
+If a file path doesn't exist, an error is returned but remaining segments still send.
+If TTS fails, an error is returned but remaining segments still send.
+
+File type is auto-detected from extension:
+- Images (.jpg, .png, .gif, .webp) → sent as photo
+- Videos (.mp4, .mov, .avi) → sent as video
+- Audio (.mp3, .m4a, .ogg) → sent as audio player
+- Everything else → sent as document/file
+
+
+### About incoming media from carbon
+When your carbon sends media via Telegram, the system auto-downloads it and gives you:
+- **Photos**: `[Photo received] (@/path/to/photo.jpg)` — viewable via @ syntax
+- **Videos**: `[Video received] (saved at: /path/to/video.mp4)`
+- **Voice messages**: Auto-transcribed via Whisper. You get `[Voice message transcription]: <text>`. If it fails: `[Audio message couldn't be transcribed]`
+- **Audio files**: Downloaded + transcription attempted. `[Audio: title] (saved at: /path/to/audio.mp3)`
+- **Files/Documents**: `[File received: filename.pdf] (@/path/to/file.pdf)`
+- **Stickers**: `[Sticker <emoji>]`
+
+Voice messages are auto-transcribed — respond naturally as if they spoke to you.
+You can view images and files using the (@/path) syntax since you run on Claude Code.
+
 
 ### Message Another Manager
 {

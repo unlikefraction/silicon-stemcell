@@ -36,24 +36,33 @@ def log(msg):
 
 # --- Bot token check ---
 
-def _ensure_bot_token():
-    """If Telegram bot token is not configured, prompt the user and restart."""
-    from env import TELEGRAM_BOT_TOKEN
+def _ensure_env():
+    """If Telegram bot token is not configured, prompt for it and OpenAI key. Restart after."""
+    from env import TELEGRAM_BOT_TOKEN, OPENAI_API_KEY
+
     if TELEGRAM_BOT_TOKEN:
         return
 
-    log("[Silicon] No Telegram bot token found.")
+    log("[Silicon] First boot setup.")
+    log("")
+
     log("[Silicon] Create a bot via @BotFather on Telegram, then paste the token here.")
     token = input("[Silicon] Bot token: ").strip()
     if not token:
         log("[Silicon] No token provided. Exiting.")
         sys.exit(1)
 
+    log("")
+    log("[Silicon] OpenAI API key (for voice message transcription & text-to-speech).")
+    log("[Silicon] Press Enter to skip — voice features will be disabled.")
+    openai_key = input("[Silicon] OpenAI API key: ").strip()
+
     env_path = os.path.join(PROJECT_ROOT, "env.py")
     with open(env_path, "w") as f:
         f.write(f'TELEGRAM_BOT_TOKEN = "{token}"\n')
+        f.write(f'OPENAI_API_KEY = "{openai_key}"\n')
 
-    log("[Silicon] Token saved to env.py. Restarting...")
+    log("[Silicon] Saved to env.py. Restarting...")
     os.execv(sys.executable, [sys.executable, "-u"] + sys.argv)
 
 
@@ -445,7 +454,7 @@ def run_all_managers(context_by_carbon):
 
 
 def main():
-    _ensure_bot_token()
+    _ensure_env()
 
     log("[Silicon] Starting event loop...")
     log(f"[Silicon] Tick interval: {LOOP_TICK}s")

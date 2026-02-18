@@ -1,5 +1,5 @@
 venv/
-# env.py
+env.py
 
 __pycache__/
 *.pyc
@@ -16,6 +16,9 @@ worker/outputs/_browser_queue.json
 
 # Session files (generated at runtime)
 sessions/
+
+# Telegram media (downloaded at runtime)
+core/telegram/media/
 
 # Runtime state
 .restart_pending
