@@ -21,8 +21,11 @@ AGENT_BROWSER_PROFILE_SESSION = "silicon"
 
 def _load_active():
     if os.path.exists(ACTIVE_FILE):
-        with open(ACTIVE_FILE) as f:
-            return json.load(f)
+        try:
+            with open(ACTIVE_FILE) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, ValueError):
+            return {}
     return {}
 
 
@@ -34,8 +37,11 @@ def _save_active(active):
 
 def _load_browser_queue():
     if os.path.exists(BROWSER_QUEUE_FILE):
-        with open(BROWSER_QUEUE_FILE) as f:
-            return json.load(f)
+        try:
+            with open(BROWSER_QUEUE_FILE) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, ValueError):
+            return []
     return []
 
 
@@ -47,8 +53,11 @@ def _save_browser_queue(queue):
 
 def _load_archive_meta():
     if os.path.exists(ARCHIVE_META_FILE):
-        with open(ARCHIVE_META_FILE) as f:
-            return json.load(f)
+        try:
+            with open(ARCHIVE_META_FILE) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, ValueError):
+            return {}
     return {}
 
 
