@@ -15,6 +15,7 @@ ARCHIVE_META_FILE = os.path.join(OUTPUTS_DIR, "_archive_meta.json")
 WORKER_DIR = os.path.dirname(os.path.abspath(__file__))
 AGENT_BROWSER_PROFILE_DIR = os.path.join(WORKER_DIR, "profiles", "silicon")
 AGENT_BROWSER_PROFILE_SESSION = "silicon"
+BROWSER_WORKER_MODEL = "sonnet"
 
 
 # --- State persistence ---
@@ -178,6 +179,8 @@ def _launch_worker_process(worker_id, task, worker_type, carbon_id, incognito=Fa
         "--output-format=stream-json",
         "--verbose",
     ]
+    if worker_type == "browser":
+        cmd.extend(["--model", BROWSER_WORKER_MODEL])
 
     cmd.append(task)
 
