@@ -18,5 +18,3 @@ Since writer skills can be long, make a new file for it and write the location t
 
 
 {load-ref!prompts/worker/skills/excellent_writer.md}
-
-{load-ref!prompts/worker/skills/social-voice-guide.md}

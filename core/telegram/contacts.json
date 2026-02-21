@@ -1,25 +1,4 @@
 {
-  "last_update_id": 85197898,
-  "contacts": {
-    "shubham": {
-      "name": "Shubham",
-      "carbon_id": "shubham",
-      "telegram_userid": 718242658,
-      "trust_level": "ultimate",
-      "is_central_carbon": true,
-      "relation": "",
-      "description": "",
-      "timezone": ""
-    },
-    "saket": {
-      "name": "Saket",
-      "carbon_id": "saket",
-      "telegram_userid": 7001684641,
-      "trust_level": "very_high",
-      "is_central_carbon": false,
-      "relation": "Co-founder of 45d",
-      "description": "Co-founder of 45d. Verified by Shubham.",
-      "timezone": ""
-    }
-  }
+  "last_update_id": 0,
+  "contacts": {}
 }
