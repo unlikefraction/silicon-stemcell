@@ -23,6 +23,7 @@ from worker.handler import (
     list_active,
     list_archive,
     read_archive,
+    sweep_orphaned_daemons,
 )
 from core.cron.checkback import add_checkback
 
@@ -460,6 +461,11 @@ def main():
 
     log("[Silicon] Starting event loop...")
     log(f"[Silicon] Tick interval: {LOOP_TICK}s")
+
+    # Clean up any orphaned incognito daemons from a previous run that crashed
+    cleaned = sweep_orphaned_daemons()
+    if cleaned:
+        log(f"[Silicon] Swept {len(cleaned)} orphaned daemon(s): {cleaned}")
 
     # Check if we just restarted
     restart_msg, restart_carbon_id = _check_restart_flag()
