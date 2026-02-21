@@ -82,18 +82,82 @@ def _is_profiled_browser_active():
     return False
 
 
+def _get_agent_browser_socket_dir():
+    """Return the agent-browser socket directory (mirrors daemon.js getSocketDir logic)."""
+    override = os.environ.get("AGENT_BROWSER_SOCKET_DIR")
+    if override:
+        return override
+    xdg = os.environ.get("XDG_RUNTIME_DIR")
+    if xdg:
+        return os.path.join(xdg, "agent-browser")
+    home = os.path.expanduser("~")
+    if home:
+        return os.path.join(home, ".agent-browser")
+    return os.path.join("/tmp", "agent-browser")
+
+
+def _kill_incognito_daemon_by_pid(worker_id):
+    """Kill an incognito daemon directly via its PID file (fallback when 'close' fails)."""
+    socket_dir = _get_agent_browser_socket_dir()
+    pid_file = os.path.join(socket_dir, f"incognito-{worker_id}.pid")
+    if not os.path.exists(pid_file):
+        return
+    try:
+        with open(pid_file) as f:
+            pid = int(f.read().strip())
+        os.kill(pid, signal.SIGTERM)
+    except Exception:
+        pass
+    # Clean up stale files regardless
+    for ext in (".pid", ".sock", ".stream"):
+        try:
+            fpath = os.path.join(socket_dir, f"incognito-{worker_id}{ext}")
+            if os.path.exists(fpath):
+                os.unlink(fpath)
+        except Exception:
+            pass
+
+
 def _cleanup_agent_browser_session(worker_id, worker_info):
     """Close the agent-browser daemon session after an incognito browser worker finishes."""
     if worker_info.get("worker_type") != "browser":
         return
     if worker_info.get("incognito", False):
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["agent-browser", "--session", f"incognito-{worker_id}", "close"],
                 capture_output=True, timeout=10,
             )
+            if result.returncode != 0:
+                _kill_incognito_daemon_by_pid(worker_id)
         except Exception:
-            pass
+            _kill_incognito_daemon_by_pid(worker_id)
+
+
+def sweep_orphaned_daemons():
+    """Kill any incognito daemons whose worker IDs are no longer in active workers.
+
+    Call this at startup and periodically to prevent daemon accumulation from
+    workers that crashed or were killed before cleanup could run.
+    Returns a list of worker_ids that were cleaned up.
+    """
+    socket_dir = _get_agent_browser_socket_dir()
+    if not os.path.exists(socket_dir):
+        return []
+
+    active = _load_active()
+    active_worker_ids = set(active.keys())
+    cleaned = []
+
+    for fname in os.listdir(socket_dir):
+        if not fname.startswith("incognito-") or not fname.endswith(".pid"):
+            continue
+        worker_id = fname[len("incognito-"):-len(".pid")]
+        if worker_id not in active_worker_ids:
+            _kill_incognito_daemon_by_pid(worker_id)
+            cleaned.append(worker_id)
+
+    return cleaned
 
 
 def _launch_worker_process(worker_id, task, worker_type, carbon_id, incognito=False):
@@ -366,6 +430,8 @@ def stop_worker(worker_id, carbon_id):
 
         return f"Done. Worker '{worker_id}' stopped. Output archived as '{archive_id}'"
 
+    # Trigger queue processing in case this was a profiled browser worker
+    _process_browser_queue()
     return f"Done. Worker '{worker_id}' stopped."
 
 
@@ -460,8 +526,18 @@ def _has_result_event(output_path):
     return False
 
 
+_sweep_call_counter = 0
+_SWEEP_INTERVAL = 10  # run orphan sweep every N check_completed_workers calls
+
+
 def check_completed_workers():
     """Check for workers that finished. Returns {carbon_id: [completed_info, ...]}."""
+    global _sweep_call_counter
+    _sweep_call_counter += 1
+    if _sweep_call_counter >= _SWEEP_INTERVAL:
+        _sweep_call_counter = 0
+        sweep_orphaned_daemons()
+
     active = _load_active()
     completed_by_carbon = {}
     had_browser_completion = False
@@ -530,19 +606,18 @@ def check_completed_workers():
     if meta_changed:
         _save_archive_meta(meta)
 
-    # If a browser worker completed, try to start the next queued one
-    if had_browser_completion:
-        queue_result, queue_carbon_id = _process_browser_queue()
-        if queue_result and queue_carbon_id:
-            if queue_carbon_id not in completed_by_carbon:
-                completed_by_carbon[queue_carbon_id] = []
-            completed_by_carbon[queue_carbon_id].append({
-                "worker_id": "[queue]",
-                "worker_type": "browser",
-                "carbon_id": queue_carbon_id,
-                "archive_id": "",
-                "result": queue_result,
-            })
+    # Always try to start the next queued browser worker
+    queue_result, queue_carbon_id = _process_browser_queue()
+    if queue_result and queue_carbon_id:
+        if queue_carbon_id not in completed_by_carbon:
+            completed_by_carbon[queue_carbon_id] = []
+        completed_by_carbon[queue_carbon_id].append({
+            "worker_id": "[queue]",
+            "worker_type": "browser",
+            "carbon_id": queue_carbon_id,
+            "archive_id": "",
+            "result": queue_result,
+        })
 
     return completed_by_carbon
 

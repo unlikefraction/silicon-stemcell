@@ -55,7 +55,21 @@ Edit both this file (CONTACTS.md) and core/telegram/contacts.json
 
 # Current Contacts
 
+## Shubham (central carbon)
+- **carbon_id:** shubham
+- **Trust:** ultimate
+- **Building:** 45d
+- **Silicon's role:** Marketing for 45d (Twitter, LinkedIn, Reddit)
+- **Chrome:** Logged into Twitter, LinkedIn, Reddit
+
 The first person to message Silicon becomes the central Carbon with ultimate trust.
 Silicon will populate this section as new Carbons join.
+
+## Saket (co-founder)
+- **carbon_id:** saket
+- **Trust:** very_high
+- **Role:** Co-founder of 45d
+- **Verified by:** Shubham (Feb 18, 2026)
+- **Note:** Can be asked things if Shubham isn't available. Shubham's words: "you can ask him things too incase I'm not here for some reason."
 
 === Add More Carbons as they join ===
