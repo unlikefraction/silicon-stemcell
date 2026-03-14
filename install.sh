@@ -819,6 +819,85 @@ cmd_browser() {
     "$PYTHON_CMD" main.py browser
 }
 
+cmd_update() {
+    # Update the silicon CLI script (not the instances themselves)
+    info "Updating silicon CLI..."
+    local script_url="https://raw.githubusercontent.com/unlikefraction/silicon-stemcell/main/install.sh"
+    local tmp_script
+    tmp_script=$(mktemp /tmp/silicon-update-XXXXXX.sh)
+
+    if command -v curl &>/dev/null; then
+        curl -fsSL "$script_url" -o "$tmp_script"
+    elif command -v wget &>/dev/null; then
+        wget -q "$script_url" -O "$tmp_script"
+    else
+        error "Need curl or wget to update"
+        rm -f "$tmp_script"
+        exit 1
+    fi
+
+    # Extract just the CLI script portion (between CLIEOF markers)
+    local cli_path="$HOME/.silicon/bin/silicon"
+    local in_cli=false
+    local new_cli
+    new_cli=$(mktemp /tmp/silicon-cli-XXXXXX)
+
+    while IFS= read -r line; do
+        if [[ "$line" == 'cat > "$CLI_SCRIPT" << '\''CLIEOF'\''' ]]; then
+            in_cli=true
+            continue
+        fi
+        if [[ "$line" == "CLIEOF" ]] && [ "$in_cli" = true ]; then
+            break
+        fi
+        if [ "$in_cli" = true ]; then
+            echo "$line"
+        fi
+    done < "$tmp_script" > "$new_cli"
+
+    if [ -s "$new_cli" ]; then
+        cp "$new_cli" "$cli_path"
+        chmod +x "$cli_path"
+        success "CLI updated to latest version"
+    else
+        error "Failed to extract CLI from installer. Try: silicon install"
+    fi
+
+    rm -f "$tmp_script" "$new_cli"
+}
+
+cmd_debug() {
+    local target="$1"
+    local inst
+
+    if [ -n "$target" ]; then
+        inst=$(find_installation "$target") || { error "Silicon '$target' not found"; exit 1; }
+    else
+        inst=$(find_installation) || inst=$(pick_installation)
+    fi
+
+    IFS='|' read -r idx name path pid_file <<< "$inst"
+
+    if [ "$(is_running "$pid_file")" != "running" ]; then
+        error "'$name' is not running. Start it first with: silicon start $name"
+        exit 1
+    fi
+
+    local log_file="$path/.silicon.log"
+    if [ ! -f "$log_file" ]; then
+        error "No log file found at $log_file"
+        exit 1
+    fi
+
+    local pid
+    pid=$(get_pid "$pid_file")
+    printf "\n${BOLD}${CYAN}Debugging '$name'${RESET} (PID $pid)\n"
+    printf "${DIM}  Log: $log_file${RESET}\n"
+    printf "${DIM}  Press Ctrl+C to detach${RESET}\n\n"
+
+    tail -f "$log_file"
+}
+
 cmd_install() {
     # Re-run the installer
     local script_url="https://raw.githubusercontent.com/unlikefraction/silicon-stemcell/main/install.sh"
@@ -840,7 +919,9 @@ cmd_help() {
     printf "  silicon stop [name]         Stop a running instance\n"
     printf "  silicon status [name]       Show instance status\n"
     printf "  silicon browser [name]      Open headed browser for login\n"
+    printf "  silicon debug [name]        Attach to running instance (live logs)\n"
     printf "  silicon list                List all instances\n"
+    printf "  silicon update              Update the silicon CLI script\n"
     printf "  silicon install             Install a new instance\n"
     printf "  silicon help                Show this help\n"
     echo ""
@@ -856,7 +937,9 @@ case "$CMD" in
     stop)    cmd_stop "$ARG" ;;
     status)  cmd_status "$ARG" ;;
     browser) cmd_browser "$ARG" ;;
+    debug)   cmd_debug "$ARG" ;;
     list|ls) cmd_list ;;
+    update)  cmd_update ;;
     install) cmd_install ;;
     help|-h|--help) cmd_help ;;
     "")      cmd_status "" ;;
@@ -933,9 +1016,11 @@ echo ""
 printf "  ${BOLD}${CYAN}Quick start:${RESET}\n"
 printf "    ${DIM}# Start a new terminal (or run: source ~/.zshrc)${RESET}\n"
 printf "    silicon start          ${DIM}# Start silicon${RESET}\n"
+printf "    silicon debug           ${DIM}# Attach to live logs${RESET}\n"
 printf "    silicon browser        ${DIM}# Login to services${RESET}\n"
 printf "    silicon stop           ${DIM}# Stop silicon${RESET}\n"
 printf "    silicon list           ${DIM}# See all instances${RESET}\n"
+printf "    silicon update         ${DIM}# Update CLI to latest${RESET}\n"
 echo ""
 printf "  ${BOLD}${CYAN}All commands:${RESET}\n"
 printf "    silicon help\n"
