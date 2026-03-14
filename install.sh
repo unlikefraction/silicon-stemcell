@@ -341,7 +341,8 @@ case "$dir_choice" in
         ;;
 esac
 
-INSTANCE_NAME=$(read_input "Name this silicon instance" "silicon")
+printf "\n${DIM}  Name this instance (useful if you run multiple silicons on this machine).${RESET}\n" >&2
+INSTANCE_NAME=$(read_input "Instance name" "silicon")
 
 SKIP_CLONE=false
 if [ -d "$INSTALL_DIR" ]; then
