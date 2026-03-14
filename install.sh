@@ -838,22 +838,10 @@ cmd_update() {
 
     # Extract just the CLI script portion (between CLIEOF markers)
     local cli_path="$HOME/.silicon/bin/silicon"
-    local in_cli=false
     local new_cli
     new_cli=$(mktemp /tmp/silicon-cli-XXXXXX)
 
-    while IFS= read -r line; do
-        if [[ "$line" == 'cat > "$CLI_SCRIPT" << '\''CLIEOF'\''' ]]; then
-            in_cli=true
-            continue
-        fi
-        if [[ "$line" == "CLIEOF" ]] && [ "$in_cli" = true ]; then
-            break
-        fi
-        if [ "$in_cli" = true ]; then
-            echo "$line"
-        fi
-    done < "$tmp_script" > "$new_cli"
+    sed -n "/^cat > .*CLI_SCRIPT.*<< 'CLIEOF'/,/^CLIEOF$/p" "$tmp_script" | sed '1d;$d' > "$new_cli"
 
     if [ -s "$new_cli" ]; then
         cp "$new_cli" "$cli_path"
