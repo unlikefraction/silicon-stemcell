@@ -921,7 +921,7 @@ cmd_help() {
     printf "  silicon browser [name]      Open headed browser for login\n"
     printf "  silicon debug [name]        Attach to running instance (live logs)\n"
     printf "  silicon list                List all instances\n"
-    printf "  silicon update              Update the silicon CLI script\n"
+    printf "  silicon script update       Update the silicon CLI script\n"
     printf "  silicon install             Install a new instance\n"
     printf "  silicon help                Show this help\n"
     echo ""
@@ -939,7 +939,12 @@ case "$CMD" in
     browser) cmd_browser "$ARG" ;;
     debug)   cmd_debug "$ARG" ;;
     list|ls) cmd_list ;;
-    update)  cmd_update ;;
+    script)
+        case "$ARG" in
+            update) cmd_update ;;
+            *) error "Unknown script command: $ARG. Did you mean: silicon script update?"; exit 1 ;;
+        esac
+        ;;
     install) cmd_install ;;
     help|-h|--help) cmd_help ;;
     "")      cmd_status "" ;;
@@ -1020,7 +1025,7 @@ printf "    silicon debug           ${DIM}# Attach to live logs${RESET}\n"
 printf "    silicon browser        ${DIM}# Login to services${RESET}\n"
 printf "    silicon stop           ${DIM}# Stop silicon${RESET}\n"
 printf "    silicon list           ${DIM}# See all instances${RESET}\n"
-printf "    silicon update         ${DIM}# Update CLI to latest${RESET}\n"
+printf "    silicon script update  ${DIM}# Update CLI to latest${RESET}\n"
 echo ""
 printf "  ${BOLD}${CYAN}All commands:${RESET}\n"
 printf "    silicon help\n"
