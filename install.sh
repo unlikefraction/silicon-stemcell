@@ -898,6 +898,114 @@ cmd_debug() {
     tail -f "$log_file"
 }
 
+cmd_attach() {
+    local target_dir="${1:-$(pwd)}"
+
+    # Resolve to absolute path
+    target_dir=$(cd "$target_dir" 2>/dev/null && pwd || echo "$target_dir")
+
+    # Check if it's a silicon directory
+    if [ ! -f "$target_dir/main.py" ] || [ ! -f "$target_dir/config.py" ]; then
+        error "This doesn't look like a silicon directory."
+        info "Expected main.py and config.py in: $target_dir"
+        info "Navigate to a silicon directory and try again, or pass the path:"
+        info "  silicon attach /path/to/silicon"
+        return 1
+    fi
+
+    if [ ! -d "$target_dir/prompts" ] || [ ! -d "$target_dir/core" ]; then
+        error "Missing prompts/ or core/ directory. Not a valid silicon."
+        return 1
+    fi
+
+    # Check if already registered
+    while IFS='|' read -r idx name path pid_file; do
+        if [ "$path" = "$target_dir" ]; then
+            warn "This silicon is already registered as '$name'"
+            return 0
+        fi
+    done <<< "$(get_installations)"
+
+    success "Found a silicon at: $target_dir"
+
+    # Ask for name
+    printf "\n${DIM}  Give this instance a name so you can tell it apart from others.${RESET}\n"
+    local dir_basename
+    dir_basename=$(basename "$target_dir")
+    printf "${BOLD}? Instance name [%s]:${RESET} " "$dir_basename"
+    read -r instance_name
+    instance_name="${instance_name:-$dir_basename}"
+
+    # Check if name already taken
+    while IFS='|' read -r idx name path pid_file; do
+        if [ "$name" = "$instance_name" ]; then
+            error "Name '$instance_name' is already taken. Pick a different one."
+            return 1
+        fi
+    done <<< "$(get_installations)"
+
+    # Detect if running
+    local is_currently_running=false
+    local detected_pid=""
+
+    # Check for existing .silicon.pid
+    if [ -f "$target_dir/.silicon.pid" ]; then
+        local pid
+        pid=$(cat "$target_dir/.silicon.pid" 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            is_currently_running=true
+            detected_pid="$pid"
+        fi
+    fi
+
+    # Also try to find python main.py running from that dir
+    if [ "$is_currently_running" = false ]; then
+        detected_pid=$(ps aux | grep "[p]ython.*main.py" | grep "$target_dir" | awk '{print $2}' | head -1)
+        if [ -n "$detected_pid" ] && kill -0 "$detected_pid" 2>/dev/null; then
+            is_currently_running=true
+        fi
+    fi
+
+    local pid_file="$target_dir/.silicon.pid"
+
+    if [ "$is_currently_running" = true ]; then
+        success "Detected running instance (PID $detected_pid)"
+        # Write PID file so we can track it
+        echo "$detected_pid" > "$pid_file"
+    else
+        info "Instance is not currently running."
+    fi
+
+    # Register it
+    "$PYTHON_CMD" -c "
+import json, os
+reg_file = '$REGISTRY_FILE'
+if os.path.exists(reg_file):
+    with open(reg_file) as f:
+        reg = json.load(f)
+else:
+    reg = {'installations': []}
+
+reg['installations'].append({
+    'name': '$instance_name',
+    'path': '$target_dir',
+    'pid_file': '$pid_file'
+})
+
+with open(reg_file, 'w') as f:
+    json.dump(reg, f, indent=2)
+"
+
+    success "Attached '$instance_name' at $target_dir"
+
+    if [ "$is_currently_running" = true ]; then
+        printf "\n  ${BOLD}%s${RESET} ${GREEN}● running${RESET} (PID %s)\n\n" "$instance_name" "$detected_pid"
+    else
+        printf "\n  ${BOLD}%s${RESET} ${DIM}○ stopped${RESET}\n" "$instance_name"
+        printf "  Start it with: ${BOLD}silicon start %s${RESET}\n\n" "$instance_name"
+    fi
+}
+
 cmd_install() {
     # Re-run the installer
     local script_url="https://raw.githubusercontent.com/unlikefraction/silicon-stemcell/main/install.sh"
@@ -920,11 +1028,60 @@ cmd_help() {
     printf "  silicon status [name]       Show instance status\n"
     printf "  silicon browser [name]      Open headed browser for login\n"
     printf "  silicon debug [name]        Attach to running instance (live logs)\n"
+    printf "  silicon attach [path]       Register an existing silicon instance\n"
     printf "  silicon list                List all instances\n"
     printf "  silicon script update       Update the silicon CLI script\n"
     printf "  silicon install             Install a new instance\n"
     printf "  silicon help                Show this help\n"
     echo ""
+}
+
+# ── Fuzzy command matching ───────────────────────────────────
+
+suggest_command() {
+    local input="$1"
+    local commands="start stop status browser debug attach list install help script"
+    local best_match=""
+    local best_score=999
+
+    for cmd in $commands; do
+        # Simple Levenshtein-like: count chars in common
+        local score=0
+        local i=0
+        local input_len=${#input}
+        local cmd_len=${#cmd}
+
+        # Length difference penalty
+        local len_diff=$((input_len - cmd_len))
+        [ "$len_diff" -lt 0 ] && len_diff=$((-len_diff))
+
+        # Check prefix match
+        if [[ "$cmd" == "$input"* ]] || [[ "$input" == "$cmd"* ]]; then
+            score=$len_diff
+        else
+            # Character overlap score
+            local common=0
+            for ((i=0; i<input_len && i<cmd_len; i++)); do
+                if [ "${input:$i:1}" = "${cmd:$i:1}" ]; then
+                    common=$((common + 1))
+                fi
+            done
+            local max_len=$cmd_len
+            [ "$input_len" -gt "$max_len" ] && max_len=$input_len
+            score=$((max_len - common + len_diff))
+        fi
+
+        if [ "$score" -lt "$best_score" ]; then
+            best_score=$score
+            best_match=$cmd
+        fi
+    done
+
+    # Only suggest if reasonably close (score <= 3)
+    if [ "$best_score" -le 3 ] && [ -n "$best_match" ]; then
+        printf "\n${YELLOW}Did you mean?${RESET}\n"
+        printf "  silicon %s\n\n" "$best_match"
+    fi
 }
 
 # ── Main dispatch ─────────────────────────────────────────────
@@ -938,6 +1095,7 @@ case "$CMD" in
     status)  cmd_status "$ARG" ;;
     browser) cmd_browser "$ARG" ;;
     debug)   cmd_debug "$ARG" ;;
+    attach)  cmd_attach "$ARG" ;;
     list|ls) cmd_list ;;
     script)
         case "$ARG" in
@@ -948,7 +1106,10 @@ case "$CMD" in
     install) cmd_install ;;
     help|-h|--help) cmd_help ;;
     "")      cmd_status "" ;;
-    *)       error "Unknown command: $CMD"; cmd_help; exit 1 ;;
+    *)
+        error "Unknown command: $CMD"
+        suggest_command "$CMD"
+        ;;
 esac
 CLIEOF
 
