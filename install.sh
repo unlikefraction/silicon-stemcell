@@ -616,15 +616,15 @@ find_installation() {
 pick_installation() {
     local count
     count=$(get_count)
-    if [ "$count" -eq 0 ]; then
-        error "No silicon installations found. Run 'silicon install' first."
+    if [ -z "$count" ] || [ "$count" -eq 0 ]; then
+        error "No silicon installations found. Run 'silicon install' first." >&2
         exit 1
     elif [ "$count" -eq 1 ]; then
         get_installations | head -1
         return 0
     fi
 
-    printf "\n${BOLD}Select a silicon instance:${RESET}\n\n"
+    printf "\n${BOLD}Select a silicon instance:${RESET}\n\n" >&2
     while IFS='|' read -r idx name path pid_file; do
         local status
         status=$(is_running "$pid_file")
@@ -634,11 +634,11 @@ pick_installation() {
         else
             status_color="${DIM}○ stopped${RESET}"
         fi
-        printf "  ${BOLD}%d)${RESET} %-20s %b  ${DIM}%s${RESET}\n" "$((idx + 1))" "$name" "$status_color" "$path"
+        printf "  ${BOLD}%d)${RESET} %-20s %b  ${DIM}%s${RESET}\n" "$((idx + 1))" "$name" "$status_color" "$path" >&2
     done <<< "$(get_installations)"
 
-    echo ""
-    printf "${BOLD}? Choice [1]:${RESET} "
+    echo "" >&2
+    printf "${BOLD}? Choice [1]:${RESET} " >&2
     read -r choice
     choice="${choice:-1}"
     local target_idx=$((choice - 1))
