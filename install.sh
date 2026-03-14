@@ -39,9 +39,9 @@ confirm() {
 read_input() {
     local prompt="$1" default="${2:-}"
     if [ -n "$default" ]; then
-        ask "$prompt [$default]:"
+        printf "${BOLD}? %s [%s]:${RESET} " "$prompt" "$default" >&2
     else
-        ask "$prompt:"
+        printf "${BOLD}? %s:${RESET} " "$prompt" >&2
     fi
     read -r val </dev/tty
     if [ -z "$val" ] && [ -n "$default" ]; then
@@ -52,9 +52,23 @@ read_input() {
 
 read_secret() {
     local prompt="$1"
-    ask "$prompt:"
-    read -rs val </dev/tty
-    echo ""
+    printf "${BOLD}? %s:${RESET} " "$prompt" >&2
+    local val=""
+    local char=""
+    while IFS= read -r -s -n1 char </dev/tty; do
+        if [[ -z "$char" ]]; then
+            break
+        elif [[ "$char" == $'\x7f' ]] || [[ "$char" == $'\b' ]]; then
+            if [[ -n "$val" ]]; then
+                val="${val%?}"
+                printf "\b \b" >&2
+            fi
+        else
+            val="${val}${char}"
+            printf "*" >&2
+        fi
+    done
+    printf "\n" >&2
     echo "$val"
 }
 
