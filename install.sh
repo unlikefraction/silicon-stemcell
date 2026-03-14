@@ -301,14 +301,35 @@ fi
 
 header "Step 3 · Download Silicon"
 
-DEFAULT_DIR="$HOME/silicon"
-INSTALL_DIR=$(read_input "Install directory" "$DEFAULT_DIR")
+DEFAULT_DIR="$(pwd)/silicon"
+printf "  Silicon will be installed to: ${BOLD}%s${RESET}\n\n" "$DEFAULT_DIR"
+printf "  ${BOLD}1)${RESET} Yes, install here\n"
+printf "  ${BOLD}2)${RESET} Choose a different directory\n"
+printf "  ${BOLD}3)${RESET} Don't install\n\n"
+ask "Your choice [1]:"
+read -r dir_choice </dev/tty
+dir_choice="${dir_choice:-1}"
 
-# Expand ~ if present
-INSTALL_DIR="${INSTALL_DIR/#\~/$HOME}"
+case "$dir_choice" in
+    1)
+        INSTALL_DIR="$DEFAULT_DIR"
+        ;;
+    2)
+        INSTALL_DIR=$(read_input "Install directory" "$HOME/silicon")
+        INSTALL_DIR="${INSTALL_DIR/#\~/$HOME}"
+        ;;
+    3)
+        error "Aborting."
+        exit 0
+        ;;
+    *)
+        INSTALL_DIR="$DEFAULT_DIR"
+        ;;
+esac
 
 INSTANCE_NAME=$(read_input "Name this silicon instance" "silicon")
 
+SKIP_CLONE=false
 if [ -d "$INSTALL_DIR" ]; then
     if [ -f "$INSTALL_DIR/main.py" ] && [ -f "$INSTALL_DIR/config.py" ]; then
         warn "Silicon already exists at $INSTALL_DIR"
@@ -318,7 +339,6 @@ if [ -d "$INSTALL_DIR" ]; then
         else
             warn "Backing up existing to ${INSTALL_DIR}.bak.$(date +%s)"
             mv "$INSTALL_DIR" "${INSTALL_DIR}.bak.$(date +%s)"
-            SKIP_CLONE=false
         fi
     else
         warn "Directory $INSTALL_DIR exists but doesn't look like a silicon installation."
@@ -326,42 +346,35 @@ if [ -d "$INSTALL_DIR" ]; then
             error "Aborting."
             exit 1
         fi
-        SKIP_CLONE=false
     fi
-else
-    SKIP_CLONE=false
 fi
 
-if [ "${SKIP_CLONE:-false}" = "false" ]; then
-    if confirm "Download Silicon to $INSTALL_DIR?"; then
-        if command -v git &>/dev/null; then
-            info "Cloning via git..."
-            git clone "$REPO_URL" "$INSTALL_DIR"
-            success "Cloned to $INSTALL_DIR"
-        elif command -v curl &>/dev/null; then
-            info "git not found. Downloading ZIP via curl..."
-            TMP_ZIP=$(mktemp /tmp/silicon-XXXXXX.zip)
-            TMP_DIR=$(mktemp -d /tmp/silicon-extract-XXXXXX)
-            curl -fsSL "$REPO_ZIP" -o "$TMP_ZIP"
-            unzip -q "$TMP_ZIP" -d "$TMP_DIR"
-            mv "$TMP_DIR"/silicon-stemcell-main "$INSTALL_DIR"
-            rm -rf "$TMP_ZIP" "$TMP_DIR"
-            success "Downloaded and extracted to $INSTALL_DIR"
-        elif command -v wget &>/dev/null; then
-            info "git not found. Downloading ZIP via wget..."
-            TMP_ZIP=$(mktemp /tmp/silicon-XXXXXX.zip)
-            TMP_DIR=$(mktemp -d /tmp/silicon-extract-XXXXXX)
-            wget -q "$REPO_ZIP" -O "$TMP_ZIP"
-            unzip -q "$TMP_ZIP" -d "$TMP_DIR"
-            mv "$TMP_DIR"/silicon-stemcell-main "$INSTALL_DIR"
-            rm -rf "$TMP_ZIP" "$TMP_DIR"
-            success "Downloaded and extracted to $INSTALL_DIR"
-        else
-            error "No git, curl, or wget found. Cannot download Silicon."
-            exit 1
-        fi
+if [ "$SKIP_CLONE" = "false" ]; then
+    info "Downloading Silicon to $INSTALL_DIR..."
+    if command -v git &>/dev/null; then
+        info "Cloning via git..."
+        git clone "$REPO_URL" "$INSTALL_DIR"
+        success "Cloned to $INSTALL_DIR"
+    elif command -v curl &>/dev/null; then
+        info "git not found. Downloading ZIP via curl..."
+        TMP_ZIP=$(mktemp /tmp/silicon-XXXXXX.zip)
+        TMP_DIR=$(mktemp -d /tmp/silicon-extract-XXXXXX)
+        curl -fsSL "$REPO_ZIP" -o "$TMP_ZIP"
+        unzip -q "$TMP_ZIP" -d "$TMP_DIR"
+        mv "$TMP_DIR"/silicon-stemcell-main "$INSTALL_DIR"
+        rm -rf "$TMP_ZIP" "$TMP_DIR"
+        success "Downloaded and extracted to $INSTALL_DIR"
+    elif command -v wget &>/dev/null; then
+        info "git not found. Downloading ZIP via wget..."
+        TMP_ZIP=$(mktemp /tmp/silicon-XXXXXX.zip)
+        TMP_DIR=$(mktemp -d /tmp/silicon-extract-XXXXXX)
+        wget -q "$REPO_ZIP" -O "$TMP_ZIP"
+        unzip -q "$TMP_ZIP" -d "$TMP_DIR"
+        mv "$TMP_DIR"/silicon-stemcell-main "$INSTALL_DIR"
+        rm -rf "$TMP_ZIP" "$TMP_DIR"
+        success "Downloaded and extracted to $INSTALL_DIR"
     else
-        error "Aborting."
+        error "No git, curl, or wget found. Cannot download Silicon."
         exit 1
     fi
 fi
