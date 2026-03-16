@@ -252,7 +252,7 @@ install_node() {
 if command -v node &>/dev/null && command -v npm &>/dev/null; then
     success "Node.js: $(node --version)"
 else
-    warn "Node.js / npm not found (needed for Claude Code CLI & agent-browser)"
+    warn "Node.js / npm not found (needed for Claude Code CLI & silicon-browser)"
     if confirm "Install Node.js?"; then
         install_node
         if command -v node &>/dev/null; then
@@ -289,23 +289,23 @@ else
     fi
 fi
 
-# ── agent-browser ─────────────────────────────────────────────
+# ── silicon-browser ───────────────────────────────────────────
 
-if command -v agent-browser &>/dev/null; then
-    success "agent-browser: installed"
+if command -v silicon-browser &>/dev/null; then
+    success "silicon-browser: installed"
 else
-    warn "agent-browser not found"
-    if confirm "Install agent-browser via npm?"; then
-        info "Installing @anthropic-ai/agent-browser globally..."
-        npm install -g @anthropic-ai/agent-browser
-        if command -v agent-browser &>/dev/null; then
-            success "agent-browser installed"
+    warn "silicon-browser not found"
+    if confirm "Install silicon-browser via npm?"; then
+        info "Installing silicon-browser globally..."
+        npm install -g silicon-browser
+        if command -v silicon-browser &>/dev/null; then
+            success "silicon-browser installed"
         else
-            warn "agent-browser install may have failed. Browser workers may not work."
-            warn "Try manually: npm install -g @anthropic-ai/agent-browser"
+            warn "silicon-browser install may have failed. Browser workers may not work."
+            warn "Try manually: npm install -g silicon-browser"
         fi
     else
-        warn "Skipping agent-browser. Browser workers will not be available."
+        warn "Skipping silicon-browser. Browser workers will not be available."
     fi
 fi
 
@@ -1014,22 +1014,218 @@ cmd_new() {
     echo ""
     printf "  ${BOLD}${CYAN}New Silicon.${RESET} Let's bring one to life.\n\n"
 
-    # ── 1. Claude Code CLI ─────────────────────────────────────
-    if ! command -v claude &>/dev/null; then
-        error "Claude Code is not installed."
-        echo ""
-        printf "  Silicon is built on top of Claude Code. No Claude Code, no Silicon.\n"
-        printf "  Install it: ${BOLD}https://docs.anthropic.com/en/docs/claude-code${RESET}\n"
-        printf "  Then come back and run ${BOLD}silicon new${RESET} again.\n\n"
+    # ── 1. System checks ──────────────────────────────────────
+    printf "  ${BOLD}${CYAN}── Step 1 · System Checks ──${RESET}\n\n"
+
+    # Detect OS
+    local SYS_OS="unknown"
+    case "$(uname -s)" in
+        Darwin*) SYS_OS="mac" ;;
+        Linux*)  SYS_OS="linux" ;;
+        *)       SYS_OS="unknown" ;;
+    esac
+
+    if [ "$SYS_OS" = "unknown" ]; then
+        error "Unsupported operating system: $(uname -s)"
+        error "Silicon supports macOS and Linux."
         return 1
     fi
-    local claude_version
-    claude_version=$(claude --version 2>/dev/null | head -1 || echo "unknown")
-    success "Claude Code found (${claude_version})"
+    success "Operating system: $(uname -s) ($(uname -m))"
 
-    # ── 2. Already a Silicon here? ─────────────────────────────
+    # Check disk space (need at least 500MB)
+    if command -v df &>/dev/null; then
+        local avail_kb avail_mb
+        avail_kb=$(df -k "$HOME" | tail -1 | awk '{print $4}')
+        avail_mb=$((avail_kb / 1024))
+        if [ "$avail_mb" -lt 500 ]; then
+            error "Low disk space: ${avail_mb}MB available. Need at least 500MB."
+            return 1
+        fi
+        success "Disk space: ${avail_mb}MB available"
+    fi
+
+    # ── 2. Prerequisites ──────────────────────────────────────
+    echo ""
+    printf "  ${BOLD}${CYAN}── Step 2 · Prerequisites ──${RESET}\n\n"
+
+    # ── Python 3.9+ ───────────────────────────────────────────
+    local NEW_PYTHON_CMD=""
+    for cmd in python3 python; do
+        if command -v "$cmd" &>/dev/null; then
+            local ver major minor
+            ver=$("$cmd" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
+            major=$(echo "$ver" | cut -d. -f1)
+            minor=$(echo "$ver" | cut -d. -f2)
+            if [ "$major" -ge 3 ] && [ "$minor" -ge 9 ]; then
+                NEW_PYTHON_CMD="$cmd"
+                break
+            fi
+        fi
+    done
+
+    if [ -n "$NEW_PYTHON_CMD" ]; then
+        success "Python: $($NEW_PYTHON_CMD --version) ($NEW_PYTHON_CMD)"
+    else
+        warn "Python 3.9+ not found"
+        printf "${BOLD}? Install Python? [Y/n]:${RESET} "
+        read -r py_ans
+        case "$py_ans" in
+            [nN]*)
+                error "Python 3.9+ is required. Aborting."
+                return 1
+                ;;
+            *)
+                if [ "$SYS_OS" = "mac" ]; then
+                    if command -v brew &>/dev/null; then
+                        info "Installing Python via Homebrew..."
+                        brew install python3
+                    else
+                        error "Homebrew not found. Install Python 3.9+ manually from https://python.org/downloads"
+                        return 1
+                    fi
+                else
+                    if command -v apt-get &>/dev/null; then
+                        info "Installing Python via apt..."
+                        sudo apt-get update -qq && sudo apt-get install -y python3 python3-pip python3-venv
+                    elif command -v dnf &>/dev/null; then
+                        sudo dnf install -y python3 python3-pip
+                    elif command -v yum &>/dev/null; then
+                        sudo yum install -y python3 python3-pip
+                    elif command -v pacman &>/dev/null; then
+                        sudo pacman -S --noconfirm python python-pip
+                    else
+                        error "No supported package manager found. Install Python 3.9+ manually."
+                        return 1
+                    fi
+                fi
+                # Re-check
+                for cmd in python3 python; do
+                    if command -v "$cmd" &>/dev/null; then
+                        ver=$("$cmd" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
+                        major=$(echo "$ver" | cut -d. -f1)
+                        minor=$(echo "$ver" | cut -d. -f2)
+                        if [ "$major" -ge 3 ] && [ "$minor" -ge 9 ]; then
+                            NEW_PYTHON_CMD="$cmd"
+                            break
+                        fi
+                    fi
+                done
+                if [ -z "$NEW_PYTHON_CMD" ]; then
+                    error "Python installation failed. Install Python 3.9+ manually and re-run."
+                    return 1
+                fi
+                success "Python installed: $($NEW_PYTHON_CMD --version)"
+                ;;
+        esac
+    fi
+
+    # ── Node.js / npm ─────────────────────────────────────────
+    if command -v node &>/dev/null && command -v npm &>/dev/null; then
+        success "Node.js: $(node --version)"
+    else
+        warn "Node.js / npm not found (needed for Claude Code CLI & silicon-browser)"
+        printf "${BOLD}? Install Node.js? [Y/n]:${RESET} "
+        read -r node_ans
+        case "$node_ans" in
+            [nN]*)
+                error "Node.js is required for Claude Code CLI. Aborting."
+                return 1
+                ;;
+            *)
+                if [ "$SYS_OS" = "mac" ]; then
+                    if command -v brew &>/dev/null; then
+                        info "Installing Node.js via Homebrew..."
+                        brew install node
+                    else
+                        error "Install Node.js from https://nodejs.org or install Homebrew first."
+                        return 1
+                    fi
+                else
+                    if command -v apt-get &>/dev/null; then
+                        info "Installing Node.js via apt..."
+                        if ! command -v curl &>/dev/null; then
+                            sudo apt-get install -y curl
+                        fi
+                        curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+                        sudo apt-get install -y nodejs
+                    elif command -v dnf &>/dev/null; then
+                        sudo dnf install -y nodejs npm
+                    elif command -v yum &>/dev/null; then
+                        sudo yum install -y nodejs npm
+                    elif command -v pacman &>/dev/null; then
+                        sudo pacman -S --noconfirm nodejs npm
+                    else
+                        error "Install Node.js from https://nodejs.org manually."
+                        return 1
+                    fi
+                fi
+                if command -v node &>/dev/null; then
+                    success "Node.js installed: $(node --version)"
+                else
+                    error "Node.js installation failed. Install from https://nodejs.org and re-run."
+                    return 1
+                fi
+                ;;
+        esac
+    fi
+
+    # ── Claude Code CLI ───────────────────────────────────────
+    if command -v claude &>/dev/null; then
+        local claude_version
+        claude_version=$(claude --version 2>/dev/null | head -1 || echo "unknown")
+        success "Claude Code CLI: ${claude_version}"
+    else
+        warn "Claude Code CLI not found"
+        printf "${BOLD}? Install Claude Code CLI via npm? [Y/n]:${RESET} "
+        read -r claude_ans
+        case "$claude_ans" in
+            [nN]*)
+                error "Claude Code CLI is required. Aborting."
+                return 1
+                ;;
+            *)
+                info "Installing @anthropic-ai/claude-code globally..."
+                npm install -g @anthropic-ai/claude-code
+                if command -v claude &>/dev/null; then
+                    success "Claude Code CLI installed"
+                else
+                    error "Claude Code CLI installation failed."
+                    error "Try manually: npm install -g @anthropic-ai/claude-code"
+                    return 1
+                fi
+                ;;
+        esac
+    fi
+
+    # ── silicon-browser ───────────────────────────────────────
+    if command -v silicon-browser &>/dev/null; then
+        success "silicon-browser: installed"
+    else
+        warn "silicon-browser not found"
+        printf "${BOLD}? Install silicon-browser via npm? [Y/n]:${RESET} "
+        read -r browser_ans
+        case "$browser_ans" in
+            [nN]*)
+                warn "Skipping silicon-browser. Browser workers will not be available."
+                ;;
+            *)
+                info "Installing silicon-browser globally..."
+                npm install -g silicon-browser
+                if command -v silicon-browser &>/dev/null; then
+                    success "silicon-browser installed"
+                else
+                    warn "silicon-browser install may have failed. Browser workers may not work."
+                    warn "Try manually: npm install -g silicon-browser"
+                fi
+                ;;
+        esac
+    fi
+
+    # ── 3. Check if silicon already exists ─────────────────────
+    echo ""
+    printf "  ${BOLD}${CYAN}── Step 3 · Download Silicon ──${RESET}\n\n"
+
     if [ -f "$target_dir/main.py" ] && [ -d "$target_dir/prompts" ] && [ -f "$target_dir/config.py" ]; then
-        echo ""
         warn "There's already a Silicon here."
         printf "  ${DIM}%s${RESET}\n\n" "$target_dir"
         printf "${BOLD}? Overwrite and reinitialize? [y/N]:${RESET} "
@@ -1043,8 +1239,9 @@ cmd_new() {
         esac
     fi
 
-    # ── 3. Clone the repo ──────────────────────────────────────
+    # ── 4. Clone the repo ──────────────────────────────────────
     local SILICON_REPO="https://github.com/unlikefraction/silicon.git"
+    local SILICON_ZIP="https://github.com/unlikefraction/silicon/archive/refs/heads/main.zip"
     local needs_clone=true
 
     if [ -f "$target_dir/main.py" ] && [ -f "$target_dir/config.py" ]; then
@@ -1052,11 +1249,6 @@ cmd_new() {
     fi
 
     if [ "$needs_clone" = true ]; then
-        if ! command -v git &>/dev/null; then
-            error "git is not installed. Silicon needs git to clone itself."
-            return 1
-        fi
-
         # Check if directory is empty (besides hidden files like .DS_Store)
         local file_count
         file_count=$(find "$target_dir" -maxdepth 1 -not -name '.*' -not -path "$target_dir" | wc -l | tr -d ' ')
@@ -1067,16 +1259,51 @@ cmd_new() {
             return 1
         fi
 
-        info "Cloning Silicon..."
-        if ! git clone "$SILICON_REPO" . 2>/dev/null; then
-            error "Failed to clone. Check your internet connection and try again."
+        if command -v git &>/dev/null; then
+            info "Cloning Silicon..."
+            if ! git clone "$SILICON_REPO" . 2>/dev/null; then
+                error "Failed to clone. Check your internet connection and try again."
+                return 1
+            fi
+            success "Silicon cloned"
+        elif command -v curl &>/dev/null; then
+            info "git not found. Downloading ZIP via curl..."
+            local TMP_ZIP TMP_DIR
+            TMP_ZIP=$(mktemp /tmp/silicon-XXXXXX.zip)
+            TMP_DIR=$(mktemp -d /tmp/silicon-extract-XXXXXX)
+            curl -fsSL "$SILICON_ZIP" -o "$TMP_ZIP"
+            unzip -q "$TMP_ZIP" -d "$TMP_DIR"
+            cp -a "$TMP_DIR"/silicon-main/. "$target_dir/"
+            rm -rf "$TMP_ZIP" "$TMP_DIR"
+            success "Downloaded and extracted"
+        elif command -v wget &>/dev/null; then
+            info "git not found. Downloading ZIP via wget..."
+            local TMP_ZIP TMP_DIR
+            TMP_ZIP=$(mktemp /tmp/silicon-XXXXXX.zip)
+            TMP_DIR=$(mktemp -d /tmp/silicon-extract-XXXXXX)
+            wget -q "$SILICON_ZIP" -O "$TMP_ZIP"
+            unzip -q "$TMP_ZIP" -d "$TMP_DIR"
+            cp -a "$TMP_DIR"/silicon-main/. "$target_dir/"
+            rm -rf "$TMP_ZIP" "$TMP_DIR"
+            success "Downloaded and extracted"
+        else
+            error "No git, curl, or wget found. Cannot download Silicon."
             return 1
         fi
-        success "Silicon cloned"
     fi
 
-    # ── 4. Telegram bot token (required) ───────────────────────
+    # ── 5. Install pip dependencies ────────────────────────────
+    if [ -f "$target_dir/requirements.txt" ]; then
+        info "Installing Python dependencies..."
+        "$NEW_PYTHON_CMD" -m pip install -r "$target_dir/requirements.txt" --quiet 2>/dev/null || \
+            "$NEW_PYTHON_CMD" -m pip install -r "$target_dir/requirements.txt" --quiet --user 2>/dev/null
+        success "Python dependencies installed"
+    fi
+
+    # ── 6. Configure ───────────────────────────────────────────
     echo ""
+    printf "  ${BOLD}${CYAN}── Step 4 · Configure ──${RESET}\n\n"
+
     printf "  ${BOLD}Telegram Bot Token${RESET} ${DIM}(required)${RESET}\n"
     printf "  ${DIM}This is how Silicon talks to you. Don't have a bot yet?${RESET}\n"
     printf "  ${DIM}Open Telegram > @BotFather > /newbot > copy the token. 30 seconds.${RESET}\n\n"
@@ -1105,7 +1332,6 @@ cmd_new() {
     fi
     success "Got it"
 
-    # ── 5. OpenAI key (optional) ───────────────────────────────
     echo ""
     printf "  ${BOLD}OpenAI API Key${RESET} ${DIM}(optional — for voice messages)${RESET}\n"
     printf "  ${DIM}Used for speech-to-text and TTS. Press Enter to skip.${RESET}\n\n"
@@ -1133,23 +1359,17 @@ cmd_new() {
         info "Skipped — no voice features"
     fi
 
-    # ── 6. Write env.py ────────────────────────────────────────
+    # Write env.py
     cat > "$target_dir/env.py" << ENVEOF
 TELEGRAM_BOT_TOKEN = "$telegram_token"
 OPENAI_API_KEY = "$openai_key"
 ENVEOF
     success "env.py written"
 
-    # ── 7. Install dependencies ────────────────────────────────
-    if [ -f "$target_dir/requirements.txt" ]; then
-        info "Installing dependencies..."
-        pip install -r "$target_dir/requirements.txt" --quiet 2>/dev/null || \
-            pip3 install -r "$target_dir/requirements.txt" --quiet 2>/dev/null || \
-            "$PYTHON_CMD" -m pip install -r "$target_dir/requirements.txt" --quiet 2>/dev/null
-        success "Dependencies installed"
-    fi
+    # ── 7. Register ────────────────────────────────────────────
+    echo ""
+    printf "  ${BOLD}${CYAN}── Step 5 · Registry ──${RESET}\n\n"
 
-    # ── 8. Register ────────────────────────────────────────────
     local instance_name
     instance_name=$(basename "$target_dir")
     local abs_dir
@@ -1162,7 +1382,7 @@ ENVEOF
     fi
 
     local already_registered
-    already_registered=$("$PYTHON_CMD" -c "
+    already_registered=$("$NEW_PYTHON_CMD" -c "
 import json
 with open('$REGISTRY_FILE') as f:
     reg = json.load(f)
@@ -1174,7 +1394,7 @@ print('false')
 " 2>/dev/null || echo "false")
 
     if [ "$already_registered" != "true" ]; then
-        "$PYTHON_CMD" -c "
+        "$NEW_PYTHON_CMD" -c "
 import json
 from datetime import datetime
 with open('$REGISTRY_FILE') as f:
