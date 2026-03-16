@@ -1007,10 +1007,325 @@ cmd_install() {
     fi
 }
 
+cmd_new() {
+    local target_dir
+    target_dir=$(pwd)
+
+    printf "\n${BOLD}${CYAN}"
+    cat << 'NEWBANNER'
+  ╔══════════════════════════════════════════╗
+  ║     New Silicon Instance                ║
+  ╚══════════════════════════════════════════╝
+NEWBANNER
+    printf "${RESET}\n"
+
+    # Check if Silicon already exists here
+    if [ -f "$target_dir/main.py" ] && [ -f "$target_dir/config.py" ] && [ -d "$target_dir/prompts" ]; then
+        warn "There's already a Silicon living here."
+        printf "  ${DIM}Found: main.py, config.py, prompts/ at %s${RESET}\n\n" "$target_dir"
+
+        printf "${BOLD}? Reinitialize this Silicon? This will overwrite config files. [y/N]:${RESET} "
+        read -r reinit_ans
+        case "$reinit_ans" in
+            [yY]*) info "Alright, let's reconfigure this one." ;;
+            *)
+                info "Smart move. Use 'silicon start' to fire it up if it's ready."
+                return 0
+                ;;
+        esac
+        echo ""
+    fi
+
+    # ── Step 1: Your name ──────────────────────────────────────
+    printf "  ${BOLD}Let's get you set up.${RESET}\n\n"
+    printf "${BOLD}? What's your name?:${RESET} "
+    read -r carbon_name
+    if [ -z "$carbon_name" ]; then
+        error "Need a name. Silicon doesn't serve ghosts."
+        return 1
+    fi
+
+    # Derive a carbon_id from the name (lowercase, no spaces)
+    local carbon_id
+    carbon_id=$(echo "$carbon_name" | tr '[:upper:]' '[:lower:]' | tr ' ' '_' | tr -cd 'a-z0-9_')
+
+    printf "  ${DIM}Cool. You'll be known as ${BOLD}%s${RESET}${DIM} (carbon_id: %s)${RESET}\n\n" "$carbon_name" "$carbon_id"
+
+    # ── Step 2: Telegram bot token ─────────────────────────────
+    printf "  ${BOLD}Telegram Bot Token${RESET}\n"
+    printf "  ${DIM}Silicon talks to you through Telegram. You need a bot.${RESET}\n"
+    printf "  ${DIM}Don't have one? Takes 30 seconds:${RESET}\n"
+    printf "    ${DIM}1. Open Telegram, find ${BOLD}@BotFather${RESET}\n"
+    printf "    ${DIM}2. Send ${BOLD}/newbot${RESET}${DIM}, pick a name and username${RESET}\n"
+    printf "    ${DIM}3. Copy the token it gives you${RESET}\n\n"
+
+    printf "${BOLD}? Telegram bot token:${RESET} "
+    # Read with masking
+    local telegram_token=""
+    local char=""
+    while IFS= read -r -s -n1 char; do
+        if [[ -z "$char" ]]; then
+            break
+        elif [[ "$char" == $'\x7f' ]] || [[ "$char" == $'\b' ]]; then
+            if [[ -n "$telegram_token" ]]; then
+                telegram_token="${telegram_token%?}"
+                printf "\b \b"
+            fi
+        else
+            telegram_token="${telegram_token}${char}"
+            printf "*"
+        fi
+    done
+    printf "\n"
+
+    if [ -z "$telegram_token" ]; then
+        error "Bot token is required. Silicon needs Telegram to reach you."
+        return 1
+    fi
+    success "Bot token saved"
+    echo ""
+
+    # ── Step 3: Telegram user ID ───────────────────────────────
+    printf "  ${BOLD}Your Telegram User ID${RESET}\n"
+    printf "  ${DIM}This is how Silicon knows which Telegram user is you.${RESET}\n"
+    printf "  ${DIM}Don't know yours? Easy:${RESET}\n"
+    printf "    ${DIM}1. Open Telegram, find ${BOLD}@userinfobot${RESET}\n"
+    printf "    ${DIM}2. Send it any message${RESET}\n"
+    printf "    ${DIM}3. It replies with your user ID (a number)${RESET}\n\n"
+
+    printf "${BOLD}? Your Telegram user ID:${RESET} "
+    read -r telegram_userid
+
+    if [ -z "$telegram_userid" ]; then
+        error "User ID is required. Silicon needs to know who the boss is."
+        return 1
+    fi
+
+    # Validate it's a number
+    if ! [[ "$telegram_userid" =~ ^[0-9]+$ ]]; then
+        error "That doesn't look like a Telegram user ID. It should be a number."
+        return 1
+    fi
+    success "User ID locked in"
+    echo ""
+
+    # ── Step 4: Anthropic API key ──────────────────────────────
+    printf "  ${BOLD}Anthropic API Key${RESET}\n"
+    printf "  ${DIM}Silicon's brain runs on Claude. You need an API key.${RESET}\n"
+    printf "  ${DIM}Get one at: ${BOLD}console.anthropic.com${RESET}\n\n"
+
+    printf "${BOLD}? Anthropic API key:${RESET} "
+    local anthropic_key=""
+    while IFS= read -r -s -n1 char; do
+        if [[ -z "$char" ]]; then
+            break
+        elif [[ "$char" == $'\x7f' ]] || [[ "$char" == $'\b' ]]; then
+            if [[ -n "$anthropic_key" ]]; then
+                anthropic_key="${anthropic_key%?}"
+                printf "\b \b"
+            fi
+        else
+            anthropic_key="${anthropic_key}${char}"
+            printf "*"
+        fi
+    done
+    printf "\n"
+
+    if [ -z "$anthropic_key" ]; then
+        error "API key is required. No brain, no Silicon."
+        return 1
+    fi
+    success "API key saved"
+    echo ""
+
+    # ── Step 5: OpenAI key (optional) ──────────────────────────
+    printf "  ${BOLD}OpenAI API Key ${DIM}(optional)${RESET}\n"
+    printf "  ${DIM}For voice message transcription & text-to-speech.${RESET}\n"
+    printf "  ${DIM}Press Enter to skip — voice features will be disabled.${RESET}\n\n"
+
+    printf "${BOLD}? OpenAI API key (optional):${RESET} "
+    local openai_key=""
+    while IFS= read -r -s -n1 char; do
+        if [[ -z "$char" ]]; then
+            break
+        elif [[ "$char" == $'\x7f' ]] || [[ "$char" == $'\b' ]]; then
+            if [[ -n "$openai_key" ]]; then
+                openai_key="${openai_key%?}"
+                printf "\b \b"
+            fi
+        else
+            openai_key="${openai_key}${char}"
+            printf "*"
+        fi
+    done
+    printf "\n"
+
+    if [ -n "$openai_key" ]; then
+        success "OpenAI key saved"
+    else
+        info "Skipped. Voice features disabled."
+    fi
+    echo ""
+
+    # ── Step 6: Clone / setup directory ────────────────────────
+    local REPO_URL="https://github.com/unlikefraction/silicon-stemcell.git"
+    local REPO_ZIP="https://github.com/unlikefraction/silicon-stemcell/archive/refs/heads/main.zip"
+    local needs_clone=true
+
+    if [ -f "$target_dir/main.py" ] && [ -f "$target_dir/config.py" ]; then
+        needs_clone=false
+        info "Using existing Silicon files at $target_dir"
+    fi
+
+    if [ "$needs_clone" = true ]; then
+        info "Downloading Silicon..."
+        if command -v git &>/dev/null; then
+            git clone "$REPO_URL" "$target_dir/silicon-new-tmp" 2>/dev/null
+            # Move contents (not the .git, we'll keep it)
+            shopt -s dotglob 2>/dev/null
+            mv "$target_dir/silicon-new-tmp"/* "$target_dir/" 2>/dev/null
+            mv "$target_dir/silicon-new-tmp"/.[!.]* "$target_dir/" 2>/dev/null
+            rmdir "$target_dir/silicon-new-tmp" 2>/dev/null
+            shopt -u dotglob 2>/dev/null
+            success "Downloaded via git"
+        elif command -v curl &>/dev/null; then
+            local tmp_zip
+            tmp_zip=$(mktemp /tmp/silicon-XXXXXX.zip)
+            local tmp_dir
+            tmp_dir=$(mktemp -d /tmp/silicon-extract-XXXXXX)
+            curl -fsSL "$REPO_ZIP" -o "$tmp_zip"
+            unzip -q "$tmp_zip" -d "$tmp_dir"
+            cp -R "$tmp_dir"/silicon-stemcell-main/* "$target_dir/"
+            cp -R "$tmp_dir"/silicon-stemcell-main/.[!.]* "$target_dir/" 2>/dev/null
+            rm -rf "$tmp_zip" "$tmp_dir"
+            success "Downloaded via curl"
+        else
+            error "Need git or curl to download Silicon."
+            return 1
+        fi
+    fi
+
+    # ── Step 7: Write config files ─────────────────────────────
+    info "Writing config files..."
+
+    # env.py
+    cat > "$target_dir/env.py" << ENVEOF
+TELEGRAM_BOT_TOKEN = "$telegram_token"
+OPENAI_API_KEY = "$openai_key"
+ENVEOF
+
+    # Set ANTHROPIC_API_KEY in a .env file for Claude CLI
+    echo "ANTHROPIC_API_KEY=$anthropic_key" > "$target_dir/.env"
+
+    # contacts.json — pre-register the carbon as central
+    "$PYTHON_CMD" -c "
+import json
+contacts = {
+    'last_update_id': 0,
+    'contacts': {
+        '$carbon_id': {
+            'name': '$carbon_name',
+            'carbon_id': '$carbon_id',
+            'telegram_userid': $telegram_userid,
+            'trust_level': 'ultimate',
+            'is_central_carbon': True,
+            'relation': '',
+            'description': '',
+            'timezone': ''
+        }
+    }
+}
+with open('$target_dir/core/telegram/contacts.json', 'w') as f:
+    json.dump(contacts, f, indent=2)
+"
+    # Also write the backup
+    cp "$target_dir/core/telegram/contacts.json" "$target_dir/core/telegram/contacts_backup.json" 2>/dev/null
+
+    success "Config files written"
+
+    # ── Step 8: Install pip packages ───────────────────────────
+    if [ -f "$target_dir/requirements.txt" ]; then
+        info "Installing Python dependencies..."
+        "$PYTHON_CMD" -m pip install -r "$target_dir/requirements.txt" --quiet 2>/dev/null || \
+            "$PYTHON_CMD" -m pip install -r "$target_dir/requirements.txt" --quiet --user 2>/dev/null
+        success "Dependencies installed"
+    fi
+
+    # ── Step 9: Instance name & registry ───────────────────────
+    local dir_basename
+    dir_basename=$(basename "$target_dir")
+    printf "\n${DIM}  Give this instance a name (useful if you run multiple silicons).${RESET}\n"
+    printf "${BOLD}? Instance name [%s]:${RESET} " "$dir_basename"
+    read -r instance_name
+    instance_name="${instance_name:-$dir_basename}"
+
+    local abs_dir
+    abs_dir=$(cd "$target_dir" 2>/dev/null && pwd || echo "$target_dir")
+    local pid_file="$abs_dir/.silicon.pid"
+
+    mkdir -p "$REGISTRY_DIR"
+
+    if [ ! -f "$REGISTRY_FILE" ]; then
+        echo '{"installations": []}' > "$REGISTRY_FILE"
+    fi
+
+    # Check if already registered
+    local already_registered
+    already_registered=$("$PYTHON_CMD" -c "
+import json
+with open('$REGISTRY_FILE') as f:
+    reg = json.load(f)
+for inst in reg.get('installations', []):
+    if inst.get('path') == '$abs_dir' or inst.get('name') == '$instance_name':
+        print('true')
+        exit(0)
+print('false')
+" 2>/dev/null || echo "false")
+
+    if [ "$already_registered" = "true" ]; then
+        success "Instance already registered"
+    else
+        "$PYTHON_CMD" -c "
+import json
+from datetime import datetime
+with open('$REGISTRY_FILE') as f:
+    reg = json.load(f)
+reg['installations'].append({
+    'name': '$instance_name',
+    'path': '$abs_dir',
+    'created_at': datetime.now().isoformat(),
+    'pid_file': '$pid_file'
+})
+with open('$REGISTRY_FILE', 'w') as f:
+    json.dump(reg, f, indent=2)
+"
+        success "Registered '$instance_name'"
+    fi
+
+    # ── Done! ──────────────────────────────────────────────────
+    printf "\n${GREEN}"
+    cat << 'DONEBANNER'
+  ╔══════════════════════════════════════════╗
+  ║     Silicon is ready. Let's go.         ║
+  ╚══════════════════════════════════════════╝
+DONEBANNER
+    printf "${RESET}\n"
+
+    printf "  ${BOLD}Carbon:${RESET}    %s (%s)\n" "$carbon_name" "$carbon_id"
+    printf "  ${BOLD}Instance:${RESET}  %s\n" "$instance_name"
+    printf "  ${BOLD}Location:${RESET}  %s\n" "$abs_dir"
+    echo ""
+    printf "  ${BOLD}${CYAN}Next up:${RESET}\n"
+    printf "    ${BOLD}silicon start${RESET}   ${DIM}# Boot it up${RESET}\n"
+    printf "    ${DIM}Then message your bot on Telegram. Silicon takes it from there.${RESET}\n"
+    echo ""
+}
+
 cmd_help() {
     printf "\n${BOLD}${CYAN}silicon${RESET} – manage your silicon instances\n\n"
     printf "${BOLD}Usage:${RESET}\n"
     printf "  silicon                     Show status or list instances\n"
+    printf "  silicon new                 Create a new Silicon in the current directory\n"
     printf "  silicon start [name]        Start a silicon instance\n"
     printf "  silicon stop [name]         Stop a running instance\n"
     printf "  silicon status [name]       Show instance status\n"
@@ -1028,7 +1343,7 @@ cmd_help() {
 
 suggest_command() {
     local input="$1"
-    local commands="start stop status browser debug attach list install help script"
+    local commands="start stop status browser debug attach list install new help script"
     local best_match=""
     local best_score=999
 
@@ -1091,6 +1406,7 @@ case "$CMD" in
             *) error "Unknown script command: $ARG. Did you mean: silicon script update?"; exit 1 ;;
         esac
         ;;
+    new)     cmd_new ;;
     install) cmd_install ;;
     help|-h|--help) cmd_help ;;
     "")      cmd_status "" ;;

@@ -31,16 +31,26 @@ def new_session(carbon_id):
     return new_id
 
 
+def _write_prompt_file(carbon_id, prompt):
+    """Write the system prompt to a file and return the path."""
+    prompt_file = os.path.join(SESSIONS_DIR, f"{carbon_id}_prompt.md")
+    os.makedirs(SESSIONS_DIR, exist_ok=True)
+    with open(prompt_file, "w") as f:
+        f.write(prompt)
+    return prompt_file
+
+
 def claude_code(text, carbon_id):
     """Invoke the Manager via claude CLI for a specific carbon. Returns the raw text output."""
     session_id = _get_session_id(carbon_id)
     system_prompt = get_manager_prompt(carbon_id)
+    prompt_file = _write_prompt_file(carbon_id, system_prompt)
 
     # Try resuming existing session first
     cmd = [
         "claude", "-p",
         "--resume", session_id,
-        "--system-prompt", system_prompt,
+        "--system-prompt-file", prompt_file,
         "--dangerously-skip-permissions",
     ]
 
@@ -61,7 +71,7 @@ def claude_code(text, carbon_id):
     cmd_fallback = [
         "claude", "-p",
         "--session-id", session_id,
-        "--system-prompt", system_prompt,
+        "--system-prompt-file", prompt_file,
         "--dangerously-skip-permissions",
     ]
 
