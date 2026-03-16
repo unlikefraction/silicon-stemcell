@@ -6,8 +6,8 @@ set -euo pipefail
 # curl -fsSL https://raw.githubusercontent.com/unlikefraction/silicon-stemcell/main/install.sh | bash
 # ─────────────────────────────────────────────────────────────
 
-REPO_URL="https://github.com/unlikefraction/silicon-stemcell.git"
-REPO_ZIP="https://github.com/unlikefraction/silicon-stemcell/archive/refs/heads/main.zip"
+REPO_URL="https://github.com/unlikefraction/silicon.git"
+REPO_ZIP="https://github.com/unlikefraction/silicon/archive/refs/heads/main.zip"
 REGISTRY_DIR="$HOME/.silicon"
 REGISTRY_FILE="$REGISTRY_DIR/registry.json"
 BIN_DIR="$REGISTRY_DIR/bin"
@@ -360,7 +360,7 @@ elif command -v curl &>/dev/null; then
     TMP_DIR=$(mktemp -d /tmp/silicon-extract-XXXXXX)
     curl -fsSL "$REPO_ZIP" -o "$TMP_ZIP"
     unzip -q "$TMP_ZIP" -d "$TMP_DIR"
-    mv "$TMP_DIR"/silicon-stemcell-main/* "$INSTALL_DIR/"
+    mv "$TMP_DIR"/silicon-main/* "$INSTALL_DIR/"
     rm -rf "$TMP_ZIP" "$TMP_DIR"
     success "Downloaded to $INSTALL_DIR"
 elif command -v wget &>/dev/null; then
@@ -369,7 +369,7 @@ elif command -v wget &>/dev/null; then
     TMP_DIR=$(mktemp -d /tmp/silicon-extract-XXXXXX)
     wget -q "$REPO_ZIP" -O "$TMP_ZIP"
     unzip -q "$TMP_ZIP" -d "$TMP_DIR"
-    mv "$TMP_DIR"/silicon-stemcell-main/* "$INSTALL_DIR/"
+    mv "$TMP_DIR"/silicon-main/* "$INSTALL_DIR/"
     rm -rf "$TMP_ZIP" "$TMP_DIR"
     success "Downloaded to $INSTALL_DIR"
 else
