@@ -18,7 +18,7 @@ Output should be a valid JSON and it should be a output that can then be interpr
 }
 
 About Worker Types:
-1. worker/browser: Access to a headless browser (agent-browser CLI) + Access to Terminal + Access to Direct Web Search. Use this when you need to do things on the browser or do Web Search.
+1. worker/browser: Access to a headless browser (silicon-browser CLI) + Access to Terminal + Access to Direct Web Search. Use this when you need to do things on the browser or do Web Search.
 
    By default, browser workers use a shared "silicon" profile that has login state for all services (Twitter, Gmail, etc). Only ONE profiled browser worker can run at a time (queued). The browser queue is SHARED across all carbons.
 

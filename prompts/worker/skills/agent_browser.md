@@ -1,71 +1,71 @@
-# Browser Automation with agent-browser
+# Browser Automation with silicon-browser
 
-Your primary tool for browser automation. All `agent-browser` commands are executed via Bash.
+Your primary tool for browser automation. All `silicon-browser` commands are executed via Bash.
 
-Your browser session is pre-configured via environment variables. Do NOT pass `--session` or `--profile` flags — they are already set for you. Just use `agent-browser` commands directly.
+Your browser session is pre-configured via environment variables. Do NOT pass `--session` or `--profile` flags — they are already set for you. Just use `silicon-browser` commands directly.
 
 ## Core Workflow
 
 Every browser automation follows this pattern:
 
-1. **Navigate**: `agent-browser open <url>`
-2. **Snapshot**: `agent-browser snapshot -i` (get element refs like `@e1`, `@e2`)
+1. **Navigate**: `silicon-browser open <url>`
+2. **Snapshot**: `silicon-browser snapshot -i` (get element refs like `@e1`, `@e2`)
 3. **Interact**: Use refs to click, fill, select
 4. **Re-snapshot**: After navigation or DOM changes, get fresh refs
 
 ```bash
-agent-browser open https://example.com/form
-agent-browser snapshot -i
+silicon-browser open https://example.com/form
+silicon-browser snapshot -i
 # Output: @e1 [input type="email"], @e2 [input type="password"], @e3 [button] "Submit"
 
-agent-browser fill @e1 "user@example.com"
-agent-browser fill @e2 "password123"
-agent-browser click @e3
-agent-browser wait --load networkidle
-agent-browser snapshot -i  # Check result
+silicon-browser fill @e1 "user@example.com"
+silicon-browser fill @e2 "password123"
+silicon-browser click @e3
+silicon-browser wait --load networkidle
+silicon-browser snapshot -i  # Check result
 ```
 
 ## Essential Commands
 
 ```bash
 # Navigation
-agent-browser open <url>              # Navigate (aliases: goto, navigate)
-agent-browser close                   # Close browser
+silicon-browser open <url>              # Navigate (aliases: goto, navigate)
+silicon-browser close                   # Close browser
 
 # Snapshot
-agent-browser snapshot -i             # Interactive elements with refs (recommended)
-agent-browser snapshot -i -C          # Include cursor-interactive elements (divs with onclick, cursor:pointer)
-agent-browser snapshot -s "#selector" # Scope to CSS selector
+silicon-browser snapshot -i             # Interactive elements with refs (recommended)
+silicon-browser snapshot -i -C          # Include cursor-interactive elements (divs with onclick, cursor:pointer)
+silicon-browser snapshot -s "#selector" # Scope to CSS selector
 
 # Interaction (use @refs from snapshot)
-agent-browser click @e1               # Click element
-agent-browser fill @e2 "text"         # Clear and type text
-agent-browser type @e2 "text"         # Type without clearing
-agent-browser select @e1 "option"     # Select dropdown option
-agent-browser check @e1               # Check checkbox
-agent-browser press Enter             # Press key
-agent-browser scroll down 500         # Scroll page
+silicon-browser click @e1               # Click element
+silicon-browser fill @e2 "text"         # Clear and type text
+silicon-browser type @e2 "text"         # Type without clearing
+silicon-browser select @e1 "option"     # Select dropdown option
+silicon-browser check @e1               # Check checkbox
+silicon-browser press Enter             # Press key
+silicon-browser scroll down 500         # Scroll page
 
 # Get information
-agent-browser get text @e1            # Get element text
-agent-browser get url                 # Get current URL
-agent-browser get title               # Get page title
+silicon-browser get text @e1            # Get element text
+silicon-browser get url                 # Get current URL
+silicon-browser get title               # Get page title
 
 # Wait
-agent-browser wait @e1                # Wait for element
-agent-browser wait --load networkidle # Wait for network idle
-agent-browser wait --url "**/page"    # Wait for URL pattern
-agent-browser wait 2000               # Wait milliseconds
+silicon-browser wait @e1                # Wait for element
+silicon-browser wait --load networkidle # Wait for network idle
+silicon-browser wait --url "**/page"    # Wait for URL pattern
+silicon-browser wait 2000               # Wait milliseconds
 
 # File Upload
-agent-browser upload @e1 ./image.png          # Upload single file to file input
-agent-browser upload @e1 ./a.png ./b.png      # Upload multiple files
-agent-browser upload 'input[type="file"]' ./doc.pdf  # CSS selector works too
+silicon-browser upload @e1 ./image.png          # Upload single file to file input
+silicon-browser upload @e1 ./a.png ./b.png      # Upload multiple files
+silicon-browser upload 'input[type="file"]' ./doc.pdf  # CSS selector works too
 
 # Capture
-agent-browser screenshot              # Screenshot to temp dir
-agent-browser screenshot --full       # Full page screenshot
-agent-browser pdf output.pdf          # Save as PDF
+silicon-browser screenshot              # Screenshot to temp dir
+silicon-browser screenshot --full       # Full page screenshot
+silicon-browser pdf output.pdf          # Save as PDF
 ```
 
 ## Common Patterns
@@ -73,27 +73,27 @@ agent-browser pdf output.pdf          # Save as PDF
 ### Form Submission
 
 ```bash
-agent-browser open https://example.com/signup
-agent-browser snapshot -i
-agent-browser fill @e1 "Jane Doe"
-agent-browser fill @e2 "jane@example.com"
-agent-browser select @e3 "California"
-agent-browser check @e4
-agent-browser click @e5
-agent-browser wait --load networkidle
+silicon-browser open https://example.com/signup
+silicon-browser snapshot -i
+silicon-browser fill @e1 "Jane Doe"
+silicon-browser fill @e2 "jane@example.com"
+silicon-browser select @e3 "California"
+silicon-browser check @e4
+silicon-browser click @e5
+silicon-browser wait --load networkidle
 ```
 
 ### Data Extraction
 
 ```bash
-agent-browser open https://example.com/products
-agent-browser snapshot -i
-agent-browser get text @e5           # Get specific element text
-agent-browser get text body > page.txt  # Get all page text
+silicon-browser open https://example.com/products
+silicon-browser snapshot -i
+silicon-browser get text @e5           # Get specific element text
+silicon-browser get text body > page.txt  # Get all page text
 
 # JSON output for parsing
-agent-browser snapshot -i --json
-agent-browser get text @e1 --json
+silicon-browser snapshot -i --json
+silicon-browser get text @e1 --json
 ```
 
 ### File Upload
@@ -102,32 +102,32 @@ Many sites use hidden `<input type="file">` elements — they won't show up in `
 
 ```bash
 # Hidden file inputs (common on Gmail, Twitter, etc.)
-agent-browser upload 'input[type="file"]' /path/to/image.png
+silicon-browser upload 'input[type="file"]' /path/to/image.png
 
 # If multiple file inputs exist, be more specific
-agent-browser upload 'input[type="file"][accept="image/*"]' /path/to/photo.jpg
+silicon-browser upload 'input[type="file"][accept="image/*"]' /path/to/photo.jpg
 
 # If the input is visible in snapshot, use its ref
-agent-browser upload @e7 /path/to/document.pdf
+silicon-browser upload @e7 /path/to/document.pdf
 
 # Multiple files at once
-agent-browser upload 'input[type="file"]' ./img1.png ./img2.png
+silicon-browser upload 'input[type="file"]' ./img1.png ./img2.png
 ```
 
 ### Visual Browser (Debugging)
 
 ```bash
-agent-browser --headed open https://example.com
-agent-browser highlight @e1          # Highlight element
-agent-browser record start demo.webm # Record session
+silicon-browser --headed open https://example.com
+silicon-browser highlight @e1          # Highlight element
+silicon-browser record start demo.webm # Record session
 ```
 
 ### Local Files (PDFs, HTML)
 
 ```bash
-agent-browser --allow-file-access open file:///path/to/document.pdf
-agent-browser --allow-file-access open file:///path/to/page.html
-agent-browser screenshot output.png
+silicon-browser --allow-file-access open file:///path/to/document.pdf
+silicon-browser --allow-file-access open file:///path/to/page.html
+silicon-browser screenshot output.png
 ```
 
 ## Ref Lifecycle (Important)
@@ -139,9 +139,9 @@ Refs (`@e1`, `@e2`, etc.) are invalidated when the page changes. Always re-snaps
 - Dynamic content loading (dropdowns, modals)
 
 ```bash
-agent-browser click @e5              # Navigates to new page
-agent-browser snapshot -i            # MUST re-snapshot
-agent-browser click @e1              # Use new refs
+silicon-browser click @e5              # Navigates to new page
+silicon-browser snapshot -i            # MUST re-snapshot
+silicon-browser click @e1              # Use new refs
 ```
 
 ## Semantic Locators (Alternative to Refs)
@@ -149,11 +149,11 @@ agent-browser click @e1              # Use new refs
 When refs are unavailable or unreliable, use semantic locators:
 
 ```bash
-agent-browser find text "Sign In" click
-agent-browser find label "Email" fill "user@test.com"
-agent-browser find role button click --name "Submit"
-agent-browser find placeholder "Search" type "query"
-agent-browser find testid "submit-btn" click
+silicon-browser find text "Sign In" click
+silicon-browser find label "Email" fill "user@test.com"
+silicon-browser find role button click --name "Submit"
+silicon-browser find placeholder "Search" type "query"
+silicon-browser find testid "submit-btn" click
 ```
 
 ## JavaScript Evaluation (eval)
@@ -162,11 +162,11 @@ Use `eval` to run JavaScript in the browser context. **Shell quoting can corrupt
 
 ```bash
 # Simple expressions work with regular quoting
-agent-browser eval 'document.title'
-agent-browser eval 'document.querySelectorAll("img").length'
+silicon-browser eval 'document.title'
+silicon-browser eval 'document.querySelectorAll("img").length'
 
 # Complex JS: use --stdin with heredoc (RECOMMENDED)
-agent-browser eval --stdin <<'EVALEOF'
+silicon-browser eval --stdin <<'EVALEOF'
 JSON.stringify(
   Array.from(document.querySelectorAll("img"))
     .filter(i => !i.alt)
@@ -175,7 +175,7 @@ JSON.stringify(
 EVALEOF
 
 # Alternative: base64 encoding (avoids all shell escaping issues)
-agent-browser eval -b "$(echo -n 'Array.from(document.querySelectorAll("a")).map(a => a.href)' | base64)"
+silicon-browser eval -b "$(echo -n 'Array.from(document.querySelectorAll("a")).map(a => a.href)' | base64)"
 ```
 
 **Rules of thumb:**

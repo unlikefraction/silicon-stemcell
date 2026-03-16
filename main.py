@@ -502,31 +502,32 @@ def main():
 
 
 def run_headed_browser():
-    """Open a headed browser with the silicon profile for manual login."""
-    from worker.handler import AGENT_BROWSER_PROFILE_DIR, AGENT_BROWSER_PROFILE_SESSION
-    os.makedirs(AGENT_BROWSER_PROFILE_DIR, exist_ok=True)
+    """Open headed browser via silicon-browser for manual login.
+    silicon-browser has built-in stealth and bundles its own browser."""
+    from worker.handler import SILICON_BROWSER_PROFILE
 
-    log(f"[Silicon] Opening headed browser with silicon profile at: {AGENT_BROWSER_PROFILE_DIR}")
+    log(f"[Silicon] Opening headed browser for login")
+    log(f"[Silicon] Profile: {SILICON_BROWSER_PROFILE}")
     log("[Silicon] Log into any services you need. Press Ctrl+C when done.")
     log("")
 
+    cmd = [
+        "silicon-browser",
+        "--profile", SILICON_BROWSER_PROFILE,
+        "--headed",
+        "open", "https://google.com",
+    ]
+
     try:
-        subprocess.run([
-            "agent-browser",
-            "--session", AGENT_BROWSER_PROFILE_SESSION,
-            "--profile", AGENT_BROWSER_PROFILE_DIR,
-            "--headed",
-            "open", "https://google.com",
-        ])
+        subprocess.run(cmd)
         log("[Silicon] Browser open. Log into your services, then press Ctrl+C to save and close.")
-        # Keep alive until user presses Ctrl+C
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
         log("\n[Silicon] Closing browser and saving profile...")
         subprocess.run([
-            "agent-browser",
-            "--session", AGENT_BROWSER_PROFILE_SESSION,
+            "silicon-browser",
+            "--profile", SILICON_BROWSER_PROFILE,
             "close",
         ], capture_output=True)
         log("[Silicon] Profile saved. Login state persisted for browser workers.")

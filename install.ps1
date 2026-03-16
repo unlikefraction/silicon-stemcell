@@ -159,7 +159,7 @@ $hasNpm  = $null -ne (Get-Command npm -ErrorAction SilentlyContinue)
 if ($hasNode -and $hasNpm) {
     Write-Ok "Node.js: $(node --version)"
 } else {
-    Write-Warn "Node.js / npm not found (needed for Claude Code CLI & agent-browser)"
+    Write-Warn "Node.js / npm not found (needed for Claude Code CLI & silicon-browser)"
     if (Read-Confirm "Install Node.js?") {
         $hasWinget = $null -ne (Get-Command winget -ErrorAction SilentlyContinue)
         if ($hasWinget) {
@@ -203,23 +203,23 @@ if (Get-Command claude -ErrorAction SilentlyContinue) {
     }
 }
 
-# ── agent-browser ─────────────────────────────────────────────
+# ── silicon-browser ───────────────────────────────────────────
 
-if (Get-Command agent-browser -ErrorAction SilentlyContinue) {
-    Write-Ok "agent-browser: installed"
+if (Get-Command silicon-browser -ErrorAction SilentlyContinue) {
+    Write-Ok "silicon-browser: installed"
 } else {
-    Write-Warn "agent-browser not found"
-    if (Read-Confirm "Install agent-browser via npm?") {
-        Write-Info "Installing @anthropic-ai/agent-browser globally..."
-        npm install -g @anthropic-ai/agent-browser
+    Write-Warn "silicon-browser not found"
+    if (Read-Confirm "Install silicon-browser via npm?") {
+        Write-Info "Installing silicon-browser globally..."
+        npm install -g silicon-browser
         $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
-        if (Get-Command agent-browser -ErrorAction SilentlyContinue) {
-            Write-Ok "agent-browser installed"
+        if (Get-Command silicon-browser -ErrorAction SilentlyContinue) {
+            Write-Ok "silicon-browser installed"
         } else {
-            Write-Warn "agent-browser install may have failed. Browser workers may not work."
+            Write-Warn "silicon-browser install may have failed. Browser workers may not work."
         }
     } else {
-        Write-Warn "Skipping agent-browser. Browser workers will not be available."
+        Write-Warn "Skipping silicon-browser. Browser workers will not be available."
     }
 }
 
@@ -333,6 +333,7 @@ if (-not $AlreadyConfigured) {
     @"
 TELEGRAM_BOT_TOKEN = "$TelegramToken"
 OPENAI_API_KEY = "$OpenAIKey"
+BROWSER_PROFILE = "$InstanceName"
 "@ | Set-Content $EnvFile -Encoding UTF8
 
     Write-Ok "Configuration saved to $EnvFile"

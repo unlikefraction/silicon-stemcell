@@ -13,9 +13,14 @@ BROWSER_QUEUE_FILE = os.path.join(OUTPUTS_DIR, "_browser_queue.json")
 ARCHIVE_META_FILE = os.path.join(OUTPUTS_DIR, "_archive_meta.json")
 
 WORKER_DIR = os.path.dirname(os.path.abspath(__file__))
-AGENT_BROWSER_PROFILE_DIR = os.path.join(WORKER_DIR, "profiles", "silicon")
-AGENT_BROWSER_PROFILE_SESSION = "silicon"
 BROWSER_WORKER_MODEL = "sonnet"
+
+# silicon-browser profile name (read from env.py, default 'silicon')
+try:
+    from env import BROWSER_PROFILE as _BROWSER_PROFILE
+except ImportError:
+    _BROWSER_PROFILE = "silicon"
+SILICON_BROWSER_PROFILE = _BROWSER_PROFILE
 
 
 # --- State persistence ---
@@ -83,23 +88,23 @@ def _is_profiled_browser_active():
     return False
 
 
-def _get_agent_browser_socket_dir():
-    """Return the agent-browser socket directory (mirrors daemon.js getSocketDir logic)."""
-    override = os.environ.get("AGENT_BROWSER_SOCKET_DIR")
+def _get_silicon_browser_socket_dir():
+    """Return the silicon-browser socket directory (mirrors daemon.js getSocketDir logic)."""
+    override = os.environ.get("SILICON_BROWSER_SOCKET_DIR")
     if override:
         return override
     xdg = os.environ.get("XDG_RUNTIME_DIR")
     if xdg:
-        return os.path.join(xdg, "agent-browser")
+        return os.path.join(xdg, "silicon-browser")
     home = os.path.expanduser("~")
     if home:
-        return os.path.join(home, ".agent-browser")
-    return os.path.join("/tmp", "agent-browser")
+        return os.path.join(home, ".silicon-browser")
+    return os.path.join("/tmp", "silicon-browser")
 
 
 def _kill_incognito_daemon_by_pid(worker_id):
     """Kill an incognito daemon directly via its PID file (fallback when 'close' fails)."""
-    socket_dir = _get_agent_browser_socket_dir()
+    socket_dir = _get_silicon_browser_socket_dir()
     pid_file = os.path.join(socket_dir, f"incognito-{worker_id}.pid")
     if not os.path.exists(pid_file):
         return
@@ -119,14 +124,14 @@ def _kill_incognito_daemon_by_pid(worker_id):
             pass
 
 
-def _cleanup_agent_browser_session(worker_id, worker_info):
-    """Close the agent-browser daemon session after an incognito browser worker finishes."""
+def _cleanup_silicon_browser_session(worker_id, worker_info):
+    """Close the silicon-browser daemon session after an incognito browser worker finishes."""
     if worker_info.get("worker_type") != "browser":
         return
     if worker_info.get("incognito", False):
         try:
             result = subprocess.run(
-                ["agent-browser", "--session", f"incognito-{worker_id}", "close"],
+                ["silicon-browser", "--session", f"incognito-{worker_id}", "close"],
                 capture_output=True, timeout=10,
             )
             if result.returncode != 0:
@@ -142,7 +147,7 @@ def sweep_orphaned_daemons():
     workers that crashed or were killed before cleanup could run.
     Returns a list of worker_ids that were cleaned up.
     """
-    socket_dir = _get_agent_browser_socket_dir()
+    socket_dir = _get_silicon_browser_socket_dir()
     if not os.path.exists(socket_dir):
         return []
 
@@ -184,15 +189,13 @@ def _launch_worker_process(worker_id, task, worker_type, carbon_id, incognito=Fa
 
     cmd.append(task)
 
-    # Set up environment for agent-browser
+    # Set up environment for silicon-browser
     env = os.environ.copy()
     if worker_type == "browser":
         if incognito:
-            env["AGENT_BROWSER_SESSION"] = f"incognito-{worker_id}"
+            env["SILICON_BROWSER_SESSION"] = f"incognito-{worker_id}"
         else:
-            os.makedirs(AGENT_BROWSER_PROFILE_DIR, exist_ok=True)
-            env["AGENT_BROWSER_SESSION"] = AGENT_BROWSER_PROFILE_SESSION
-            env["AGENT_BROWSER_PROFILE"] = AGENT_BROWSER_PROFILE_DIR
+            env["SILICON_BROWSER_SESSION"] = SILICON_BROWSER_PROFILE
 
     output_file = open(output_path, "w")
     process = subprocess.Popen(
@@ -408,8 +411,8 @@ def stop_worker(worker_id, carbon_id):
     except (OSError, ProcessLookupError):
         pass
 
-    # Clean up agent-browser session for incognito workers
-    _cleanup_agent_browser_session(worker_id, worker_info)
+    # Clean up silicon-browser session for incognito workers
+    _cleanup_silicon_browser_session(worker_id, worker_info)
 
     del active[worker_id]
     _save_active(active)
@@ -559,8 +562,8 @@ def check_completed_workers():
         if worker_type == "browser" and not active[worker_id].get("incognito", False):
             had_browser_completion = True
 
-        # Clean up agent-browser session for incognito workers
-        _cleanup_agent_browser_session(worker_id, active[worker_id])
+        # Clean up silicon-browser session for incognito workers
+        _cleanup_silicon_browser_session(worker_id, active[worker_id])
 
         # Worker is done - read and archive
         result_text = ""

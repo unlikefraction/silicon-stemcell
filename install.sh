@@ -436,6 +436,7 @@ if [ "$ALREADY_CONFIGURED" = "false" ]; then
     cat > "$ENV_FILE" << ENVEOF
 TELEGRAM_BOT_TOKEN = "$TELEGRAM_TOKEN"
 OPENAI_API_KEY = "$OPENAI_KEY"
+BROWSER_PROFILE = "$INSTANCE_NAME"
 ENVEOF
 
     success "Configuration saved to $ENV_FILE"
