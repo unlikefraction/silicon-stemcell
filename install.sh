@@ -315,83 +315,66 @@ fi
 
 header "Step 3 · Download Silicon"
 
-DEFAULT_DIR="$(pwd)/silicon"
-printf "  Silicon will be installed to: ${BOLD}%s${RESET}\n\n" "$DEFAULT_DIR"
-printf "  ${BOLD}1)${RESET} Yes, install here\n"
-printf "  ${BOLD}2)${RESET} Choose a different directory\n"
-printf "  ${BOLD}3)${RESET} Don't install\n\n"
-ask "Your choice [1]:"
-read -r dir_choice </dev/tty
-dir_choice="${dir_choice:-1}"
+INSTANCE_NAME=$(read_input "Name your silicon" "silicon")
 
-case "$dir_choice" in
-    1)
-        INSTALL_DIR="$DEFAULT_DIR"
-        ;;
-    2)
-        INSTALL_DIR=$(read_input "Install directory" "$HOME/silicon")
-        INSTALL_DIR="${INSTALL_DIR/#\~/$HOME}"
-        ;;
-    3)
-        error "Aborting."
-        exit 0
-        ;;
-    *)
-        INSTALL_DIR="$DEFAULT_DIR"
-        ;;
-esac
+# Check if name is already registered
+if [ -f "$REGISTRY_FILE" ] && command -v "$PYTHON_CMD" &>/dev/null; then
+    NAME_EXISTS=$("$PYTHON_CMD" -c "
+import json, sys
+with open('$REGISTRY_FILE') as f:
+    reg = json.load(f)
+for inst in reg.get('installations', []):
+    if inst.get('name') == '$INSTANCE_NAME':
+        print('true')
+        sys.exit(0)
+print('false')
+" 2>/dev/null || echo "false")
 
-printf "\n${DIM}  Name this instance (useful if you run multiple silicons on this machine).${RESET}\n" >&2
-INSTANCE_NAME=$(read_input "Instance name" "silicon")
-
-SKIP_CLONE=false
-if [ -d "$INSTALL_DIR" ]; then
-    if [ -f "$INSTALL_DIR/main.py" ] && [ -f "$INSTALL_DIR/config.py" ]; then
-        warn "Silicon already exists at $INSTALL_DIR"
-        if confirm "Use existing installation? (No will overwrite)"; then
-            success "Using existing installation at $INSTALL_DIR"
-            SKIP_CLONE=true
-        else
-            warn "Backing up existing to ${INSTALL_DIR}.bak.$(date +%s)"
-            mv "$INSTALL_DIR" "${INSTALL_DIR}.bak.$(date +%s)"
-        fi
-    else
-        warn "Directory $INSTALL_DIR exists but doesn't look like a silicon installation."
-        if ! confirm "Continue and clone into it?"; then
-            error "Aborting."
-            exit 1
-        fi
+    if [ "$NAME_EXISTS" = "true" ]; then
+        error "A silicon named '$INSTANCE_NAME' already exists."
+        info "Pick a different name or run: silicon list"
+        exit 1
     fi
 fi
 
-if [ "$SKIP_CLONE" = "false" ]; then
-    info "Downloading Silicon to $INSTALL_DIR..."
-    if command -v git &>/dev/null; then
-        info "Cloning via git..."
-        git clone "$REPO_URL" "$INSTALL_DIR"
-        success "Cloned to $INSTALL_DIR"
-    elif command -v curl &>/dev/null; then
-        info "git not found. Downloading ZIP via curl..."
-        TMP_ZIP=$(mktemp /tmp/silicon-XXXXXX.zip)
-        TMP_DIR=$(mktemp -d /tmp/silicon-extract-XXXXXX)
-        curl -fsSL "$REPO_ZIP" -o "$TMP_ZIP"
-        unzip -q "$TMP_ZIP" -d "$TMP_DIR"
-        mv "$TMP_DIR"/silicon-stemcell-main "$INSTALL_DIR"
-        rm -rf "$TMP_ZIP" "$TMP_DIR"
-        success "Downloaded and extracted to $INSTALL_DIR"
-    elif command -v wget &>/dev/null; then
-        info "git not found. Downloading ZIP via wget..."
-        TMP_ZIP=$(mktemp /tmp/silicon-XXXXXX.zip)
-        TMP_DIR=$(mktemp -d /tmp/silicon-extract-XXXXXX)
-        wget -q "$REPO_ZIP" -O "$TMP_ZIP"
-        unzip -q "$TMP_ZIP" -d "$TMP_DIR"
-        mv "$TMP_DIR"/silicon-stemcell-main "$INSTALL_DIR"
-        rm -rf "$TMP_ZIP" "$TMP_DIR"
-        success "Downloaded and extracted to $INSTALL_DIR"
-    else
-        error "No git, curl, or wget found. Cannot download Silicon."
-        exit 1
-    fi
+INSTALL_DIR="$(pwd)/$INSTANCE_NAME"
+
+# Check if directory already exists
+if [ -d "$INSTALL_DIR" ]; then
+    error "Directory '$INSTANCE_NAME' already exists here."
+    info "Pick a different name or remove the existing directory."
+    exit 1
+fi
+
+info "Creating $INSTALL_DIR..."
+mkdir -p "$INSTALL_DIR"
+
+# Clone or download
+if command -v git &>/dev/null; then
+    info "Cloning Silicon..."
+    git clone "$REPO_URL" "$INSTALL_DIR"
+    success "Cloned to $INSTALL_DIR"
+elif command -v curl &>/dev/null; then
+    info "Downloading Silicon..."
+    TMP_ZIP=$(mktemp /tmp/silicon-XXXXXX.zip)
+    TMP_DIR=$(mktemp -d /tmp/silicon-extract-XXXXXX)
+    curl -fsSL "$REPO_ZIP" -o "$TMP_ZIP"
+    unzip -q "$TMP_ZIP" -d "$TMP_DIR"
+    mv "$TMP_DIR"/silicon-stemcell-main/* "$INSTALL_DIR/"
+    rm -rf "$TMP_ZIP" "$TMP_DIR"
+    success "Downloaded to $INSTALL_DIR"
+elif command -v wget &>/dev/null; then
+    info "Downloading Silicon..."
+    TMP_ZIP=$(mktemp /tmp/silicon-XXXXXX.zip)
+    TMP_DIR=$(mktemp -d /tmp/silicon-extract-XXXXXX)
+    wget -q "$REPO_ZIP" -O "$TMP_ZIP"
+    unzip -q "$TMP_ZIP" -d "$TMP_DIR"
+    mv "$TMP_DIR"/silicon-stemcell-main/* "$INSTALL_DIR/"
+    rm -rf "$TMP_ZIP" "$TMP_DIR"
+    success "Downloaded to $INSTALL_DIR"
+else
+    error "No git, curl, or wget found. Cannot download Silicon."
+    exit 1
 fi
 
 # ── pip packages ──────────────────────────────────────────────
