@@ -1011,55 +1011,77 @@ cmd_new() {
     local target_dir
     target_dir=$(pwd)
 
-    printf "\n${BOLD}${CYAN}"
-    cat << 'NEWBANNER'
-  ╔══════════════════════════════════════════╗
-  ║     New Silicon Instance                ║
-  ╚══════════════════════════════════════════╝
-NEWBANNER
-    printf "${RESET}\n"
+    echo ""
+    printf "  ${BOLD}${CYAN}New Silicon.${RESET} Let's bring one to life.\n\n"
 
-    # ── Step 1: Check Claude Code CLI ──────────────────────────
+    # ── 1. Claude Code CLI ─────────────────────────────────────
     if ! command -v claude &>/dev/null; then
-        error "Claude Code CLI is not installed."
-        printf "  ${DIM}Silicon runs on Claude Code. Install it first:${RESET}\n"
-        printf "    ${BOLD}npm install -g @anthropic-ai/claude-code${RESET}\n"
-        printf "  ${DIM}Then run 'silicon new' again.${RESET}\n\n"
+        error "Claude Code is not installed."
+        echo ""
+        printf "  Silicon is built on top of Claude Code. No Claude Code, no Silicon.\n"
+        printf "  Install it: ${BOLD}https://docs.anthropic.com/en/docs/claude-code${RESET}\n"
+        printf "  Then come back and run ${BOLD}silicon new${RESET} again.\n\n"
         return 1
     fi
     local claude_version
-    claude_version=$(claude --version 2>/dev/null || echo "unknown")
-    success "Claude Code CLI found (${claude_version})"
-    echo ""
+    claude_version=$(claude --version 2>/dev/null | head -1 || echo "unknown")
+    success "Claude Code found (${claude_version})"
 
-    # ── Step 2: Check if Silicon already exists here ───────────
-    if [ -f "$target_dir/main.py" ] && [ -f "$target_dir/config.py" ] && [ -d "$target_dir/prompts" ]; then
-        warn "There's already a Silicon living here."
-        printf "  ${DIM}Found: main.py, config.py, prompts/ at %s${RESET}\n\n" "$target_dir"
-
-        printf "${BOLD}? Reinitialize this Silicon? This will overwrite config files. [y/N]:${RESET} "
+    # ── 2. Already a Silicon here? ─────────────────────────────
+    if [ -f "$target_dir/main.py" ] && [ -d "$target_dir/prompts" ] && [ -f "$target_dir/config.py" ]; then
+        echo ""
+        warn "There's already a Silicon here."
+        printf "  ${DIM}%s${RESET}\n\n" "$target_dir"
+        printf "${BOLD}? Overwrite and reinitialize? [y/N]:${RESET} "
         read -r reinit_ans
         case "$reinit_ans" in
-            [yY]*) info "Alright, let's reconfigure this one." ;;
+            [yY]*) info "Alright, reinitializing." ;;
             *)
-                info "Smart move. Use 'silicon start' to fire it up if it's ready."
+                info "Use 'silicon start' to fire it up."
                 return 0
                 ;;
         esac
-        echo ""
     fi
 
-    printf "  ${BOLD}Let's get you set up.${RESET}\n\n"
+    # ── 3. Clone the repo ──────────────────────────────────────
+    local SILICON_REPO="https://github.com/unlikefraction/silicon.git"
+    local needs_clone=true
 
-    # ── Step 3: Telegram bot token ─────────────────────────────
-    printf "  ${BOLD}Telegram Bot Token${RESET}\n"
-    printf "  ${DIM}Silicon talks to you through Telegram. You need a bot.${RESET}\n"
-    printf "  ${DIM}Don't have one? Takes 30 seconds:${RESET}\n"
-    printf "    ${DIM}1. Open Telegram, find ${BOLD}@BotFather${RESET}\n"
-    printf "    ${DIM}2. Send ${BOLD}/newbot${RESET}${DIM}, pick a name and username${RESET}\n"
-    printf "    ${DIM}3. Copy the token it gives you${RESET}\n\n"
+    if [ -f "$target_dir/main.py" ] && [ -f "$target_dir/config.py" ]; then
+        needs_clone=false
+    fi
 
-    printf "${BOLD}? Telegram bot token:${RESET} "
+    if [ "$needs_clone" = true ]; then
+        if ! command -v git &>/dev/null; then
+            error "git is not installed. Silicon needs git to clone itself."
+            return 1
+        fi
+
+        # Check if directory is empty (besides hidden files like .DS_Store)
+        local file_count
+        file_count=$(find "$target_dir" -maxdepth 1 -not -name '.*' -not -path "$target_dir" | wc -l | tr -d ' ')
+
+        if [ "$file_count" -gt 0 ]; then
+            error "This directory isn't empty. Run 'silicon new' in an empty directory."
+            printf "  ${DIM}Try: mkdir my-silicon && cd my-silicon && silicon new${RESET}\n\n"
+            return 1
+        fi
+
+        info "Cloning Silicon..."
+        if ! git clone "$SILICON_REPO" . 2>/dev/null; then
+            error "Failed to clone. Check your internet connection and try again."
+            return 1
+        fi
+        success "Silicon cloned"
+    fi
+
+    # ── 4. Telegram bot token (required) ───────────────────────
+    echo ""
+    printf "  ${BOLD}Telegram Bot Token${RESET} ${DIM}(required)${RESET}\n"
+    printf "  ${DIM}This is how Silicon talks to you. Don't have a bot yet?${RESET}\n"
+    printf "  ${DIM}Open Telegram > @BotFather > /newbot > copy the token. 30 seconds.${RESET}\n\n"
+
+    printf "${BOLD}? Bot token:${RESET} "
     local telegram_token=""
     local char=""
     while IFS= read -r -s -n1 char; do
@@ -1078,18 +1100,17 @@ NEWBANNER
     printf "\n"
 
     if [ -z "$telegram_token" ]; then
-        error "Bot token is required. Silicon needs Telegram to reach you."
+        error "Can't skip this one. Silicon needs Telegram to reach you."
         return 1
     fi
-    success "Bot token saved"
+    success "Got it"
+
+    # ── 5. OpenAI key (optional) ───────────────────────────────
     echo ""
+    printf "  ${BOLD}OpenAI API Key${RESET} ${DIM}(optional — for voice messages)${RESET}\n"
+    printf "  ${DIM}Used for speech-to-text and TTS. Press Enter to skip.${RESET}\n\n"
 
-    # ── Step 4: OpenAI key (optional) ──────────────────────────
-    printf "  ${BOLD}OpenAI API Key ${DIM}(optional)${RESET}\n"
-    printf "  ${DIM}For voice message transcription & text-to-speech.${RESET}\n"
-    printf "  ${DIM}Press Enter to skip — voice features will be disabled.${RESET}\n\n"
-
-    printf "${BOLD}? OpenAI API key (optional):${RESET} "
+    printf "${BOLD}? OpenAI key:${RESET} "
     local openai_key=""
     while IFS= read -r -s -n1 char; do
         if [[ -z "$char" ]]; then
@@ -1107,77 +1128,35 @@ NEWBANNER
     printf "\n"
 
     if [ -n "$openai_key" ]; then
-        success "OpenAI key saved"
+        success "Got it"
     else
-        info "Skipped. Voice features disabled."
-    fi
-    echo ""
-
-    # ── Step 5: Clone / setup directory ────────────────────────
-    local REPO_URL="https://github.com/unlikefraction/silicon-stemcell.git"
-    local REPO_ZIP="https://github.com/unlikefraction/silicon-stemcell/archive/refs/heads/main.zip"
-    local needs_clone=true
-
-    if [ -f "$target_dir/main.py" ] && [ -f "$target_dir/config.py" ]; then
-        needs_clone=false
-        info "Using existing Silicon files at $target_dir"
+        info "Skipped — no voice features"
     fi
 
-    if [ "$needs_clone" = true ]; then
-        info "Downloading Silicon..."
-        if command -v git &>/dev/null; then
-            git clone "$REPO_URL" "$target_dir/silicon-new-tmp" 2>/dev/null
-            shopt -s dotglob 2>/dev/null
-            mv "$target_dir/silicon-new-tmp"/* "$target_dir/" 2>/dev/null
-            mv "$target_dir/silicon-new-tmp"/.[!.]* "$target_dir/" 2>/dev/null
-            rmdir "$target_dir/silicon-new-tmp" 2>/dev/null
-            shopt -u dotglob 2>/dev/null
-            success "Downloaded via git"
-        elif command -v curl &>/dev/null; then
-            local tmp_zip
-            tmp_zip=$(mktemp /tmp/silicon-XXXXXX.zip)
-            local tmp_dir
-            tmp_dir=$(mktemp -d /tmp/silicon-extract-XXXXXX)
-            curl -fsSL "$REPO_ZIP" -o "$tmp_zip"
-            unzip -q "$tmp_zip" -d "$tmp_dir"
-            cp -R "$tmp_dir"/silicon-stemcell-main/* "$target_dir/"
-            cp -R "$tmp_dir"/silicon-stemcell-main/.[!.]* "$target_dir/" 2>/dev/null
-            rm -rf "$tmp_zip" "$tmp_dir"
-            success "Downloaded via curl"
-        else
-            error "Need git or curl to download Silicon."
-            return 1
-        fi
-    fi
-
-    # ── Step 6: Write env.py ───────────────────────────────────
-    info "Writing config..."
-
+    # ── 6. Write env.py ────────────────────────────────────────
     cat > "$target_dir/env.py" << ENVEOF
 TELEGRAM_BOT_TOKEN = "$telegram_token"
 OPENAI_API_KEY = "$openai_key"
 ENVEOF
-
     success "env.py written"
 
-    # ── Step 7: Install pip packages ───────────────────────────
+    # ── 7. Install dependencies ────────────────────────────────
     if [ -f "$target_dir/requirements.txt" ]; then
-        info "Installing Python dependencies..."
-        "$PYTHON_CMD" -m pip install -r "$target_dir/requirements.txt" --quiet 2>/dev/null || \
-            "$PYTHON_CMD" -m pip install -r "$target_dir/requirements.txt" --quiet --user 2>/dev/null
+        info "Installing dependencies..."
+        pip install -r "$target_dir/requirements.txt" --quiet 2>/dev/null || \
+            pip3 install -r "$target_dir/requirements.txt" --quiet 2>/dev/null || \
+            "$PYTHON_CMD" -m pip install -r "$target_dir/requirements.txt" --quiet 2>/dev/null
         success "Dependencies installed"
     fi
 
-    # ── Step 8: Register in registry ───────────────────────────
+    # ── 8. Register ────────────────────────────────────────────
     local instance_name
     instance_name=$(basename "$target_dir")
-
     local abs_dir
     abs_dir=$(cd "$target_dir" 2>/dev/null && pwd || echo "$target_dir")
     local pid_file="$abs_dir/.silicon.pid"
 
     mkdir -p "$REGISTRY_DIR"
-
     if [ ! -f "$REGISTRY_FILE" ]; then
         echo '{"installations": []}' > "$REGISTRY_FILE"
     fi
@@ -1194,9 +1173,7 @@ for inst in reg.get('installations', []):
 print('false')
 " 2>/dev/null || echo "false")
 
-    if [ "$already_registered" = "true" ]; then
-        success "Instance already registered"
-    else
+    if [ "$already_registered" != "true" ]; then
         "$PYTHON_CMD" -c "
 import json
 from datetime import datetime
@@ -1211,26 +1188,16 @@ reg['installations'].append({
 with open('$REGISTRY_FILE', 'w') as f:
     json.dump(reg, f, indent=2)
 "
-        success "Registered as '$instance_name'"
     fi
+    success "Registered as '$instance_name'"
 
-    # ── Done! ──────────────────────────────────────────────────
-    printf "\n${GREEN}"
-    cat << 'DONEBANNER'
-  ╔══════════════════════════════════════════╗
-  ║     Silicon is ready. Let's go.         ║
-  ╚══════════════════════════════════════════╝
-DONEBANNER
-    printf "${RESET}\n"
-
-    printf "  ${BOLD}Instance:${RESET}  %s\n" "$instance_name"
+    # ── Done ───────────────────────────────────────────────────
+    echo ""
+    printf "  ${GREEN}${BOLD}Silicon is alive.${RESET}\n\n"
     printf "  ${BOLD}Location:${RESET}  %s\n" "$abs_dir"
-    echo ""
-    printf "  ${BOLD}${CYAN}Next up:${RESET}\n"
-    printf "    ${BOLD}silicon start${RESET}   ${DIM}# Boot it up${RESET}\n"
-    printf "    ${DIM}Then message your bot on Telegram.${RESET}\n"
-    printf "    ${DIM}The first person to message becomes the central carbon.${RESET}\n"
-    echo ""
+    printf "  ${BOLD}Instance:${RESET}  %s\n\n" "$instance_name"
+    printf "  Run ${BOLD}silicon start${RESET} to boot it up.\n"
+    printf "  Then message your bot on Telegram — first person to say hi becomes the carbon.\n\n"
 }
 
 cmd_help() {
