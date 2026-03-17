@@ -1165,17 +1165,23 @@ cat << 'DONE'
 DONE
 printf "${RESET}\n"
 
-printf "  ${BOLD}Instance:${RESET}  %s\n" "$INSTANCE_NAME"
-printf "  ${BOLD}Location:${RESET}  %s\n" "$ABS_INSTALL_DIR"
+if [ "$SKIP_SILICON" = "false" ]; then
+    printf "  ${BOLD}Instance:${RESET}  %s\n" "$INSTANCE_NAME"
+    printf "  ${BOLD}Location:${RESET}  %s\n" "$ABS_INSTALL_DIR"
+fi
 printf "  ${BOLD}Registry:${RESET}  %s\n" "$REGISTRY_FILE"
 printf "  ${BOLD}CLI:${RESET}       %s\n" "$CLI_SCRIPT"
 echo ""
 printf "  ${BOLD}${CYAN}Quick start:${RESET}\n"
 printf "    ${DIM}# Start a new terminal (or run: source ~/.zshrc)${RESET}\n"
-printf "    silicon start          ${DIM}# Start silicon${RESET}\n"
-printf "    silicon debug           ${DIM}# Attach to live logs${RESET}\n"
-printf "    silicon browser        ${DIM}# Login to services${RESET}\n"
-printf "    silicon stop           ${DIM}# Stop silicon${RESET}\n"
+if [ "$SKIP_SILICON" = "false" ]; then
+    printf "    silicon start          ${DIM}# Start silicon${RESET}\n"
+    printf "    silicon debug           ${DIM}# Attach to live logs${RESET}\n"
+    printf "    silicon browser        ${DIM}# Login to services${RESET}\n"
+    printf "    silicon stop           ${DIM}# Stop silicon${RESET}\n"
+else
+    printf "    silicon new            ${DIM}# Create a new silicon${RESET}\n"
+fi
 printf "    silicon list           ${DIM}# See all instances${RESET}\n"
 printf "    silicon script update  ${DIM}# Update CLI to latest${RESET}\n"
 echo ""
