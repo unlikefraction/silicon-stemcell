@@ -515,6 +515,13 @@ fi  # end SKIP_SILICON check
 
 header "Step 6 · CLI Setup"
 
+# Ensure directories exist (needed even for CLI-only install)
+mkdir -p "$REGISTRY_DIR"
+mkdir -p "$BIN_DIR"
+if [ ! -f "$REGISTRY_FILE" ]; then
+    echo '{"installations": []}' > "$REGISTRY_FILE"
+fi
+
 cat > "$CLI_SCRIPT" << 'CLIEOF'
 #!/usr/bin/env bash
 # Silicon CLI – manages silicon installations
