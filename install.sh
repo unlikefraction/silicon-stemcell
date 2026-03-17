@@ -310,6 +310,17 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════
+# Create a new silicon?
+# ═════════════════════════════════════════════════════════════
+
+SKIP_SILICON=false
+if ! confirm "Create a new silicon?"; then
+    SKIP_SILICON=true
+fi
+
+if [ "$SKIP_SILICON" = "false" ]; then
+
+# ═════════════════════════════════════════════════════════════
 # STEP 3: Download the repo
 # ═════════════════════════════════════════════════════════════
 
@@ -495,6 +506,8 @@ with open(reg_path, 'w') as f:
 "
     success "Registered '$INSTANCE_NAME' at $ABS_INSTALL_DIR"
 fi
+
+fi  # end SKIP_SILICON check
 
 # ═════════════════════════════════════════════════════════════
 # STEP 6: Create CLI
