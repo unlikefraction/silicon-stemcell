@@ -3,8 +3,19 @@ import os
 import json
 import time
 import signal
+import platform
+import shutil
 
 from prompts.DNA import get_worker_prompt
+
+IS_WINDOWS = platform.system() == "Windows"
+
+# On Windows, find the full path to claude so we don't need shell=True
+CLAUDE_CMD = "claude"
+if IS_WINDOWS:
+    _claude_path = shutil.which("claude") or shutil.which("claude.cmd")
+    if _claude_path:
+        CLAUDE_CMD = _claude_path
 
 OUTPUTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs")
 
@@ -178,7 +189,7 @@ def _launch_worker_process(worker_id, task, worker_type, carbon_id, incognito=Fa
     prompt_flag = "--append-system-prompt" if worker_type == "terminal" else "--system-prompt"
 
     cmd = [
-        "claude", "-p",
+        CLAUDE_CMD, "-p",
         prompt_flag, system_prompt,
         "--dangerously-skip-permissions",
         "--output-format=stream-json",
@@ -197,14 +208,17 @@ def _launch_worker_process(worker_id, task, worker_type, carbon_id, incognito=Fa
         else:
             env["SILICON_BROWSER_SESSION"] = SILICON_BROWSER_PROFILE
 
-    output_file = open(output_path, "w")
-    process = subprocess.Popen(
-        cmd,
+    output_file = open(output_path, "w", encoding="utf-8")
+    popen_kwargs = dict(
         stdout=output_file,
         stderr=subprocess.PIPE,
-        preexec_fn=os.setsid,
         env=env,
     )
+    if IS_WINDOWS:
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["preexec_fn"] = os.setsid
+    process = subprocess.Popen(cmd, **popen_kwargs)
 
     active = _load_active()
     active[worker_id] = {
@@ -407,7 +421,11 @@ def stop_worker(worker_id, carbon_id):
     worker_type = worker_info.get("worker_type", "unknown")
 
     try:
-        os.killpg(os.getpgid(pid), signal.SIGTERM)
+        if IS_WINDOWS:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                           capture_output=True, timeout=10)
+        else:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
     except (OSError, ProcessLookupError):
         pass
 

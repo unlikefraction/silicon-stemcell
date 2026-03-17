@@ -43,7 +43,7 @@ def _resolve_load_refs(text):
             return match.group(0)
         full_path = os.path.join(PROJECT_ROOT, ref_path)
         if os.path.exists(full_path):
-            with open(full_path, "r") as f:
+            with open(full_path, "r", encoding="utf-8") as f:
                 return f.read().strip()
         return f"[load-ref error: {ref_path} not found]"
 
@@ -53,7 +53,7 @@ def _resolve_load_refs(text):
 def _read_prompt(filename):
     path = os.path.join(PROMPTS_DIR, filename)
     if os.path.exists(path):
-        with open(path, "r") as f:
+        with open(path, "r", encoding="utf-8") as f:
             content = f.read().strip()
         content = _resolve_load_refs(content)
         return f"prompts/{filename}\n{content}"
@@ -73,7 +73,7 @@ def _get_contact_info(carbon_id):
     contacts_file = os.path.join(PROJECT_ROOT, "core", "telegram", "contacts.json")
     if not os.path.exists(contacts_file):
         return None
-    with open(contacts_file) as f:
+    with open(contacts_file, encoding="utf-8") as f:
         data = json.load(f)
     return data.get("contacts", {}).get(carbon_id)
 

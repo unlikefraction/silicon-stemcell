@@ -3,11 +3,23 @@ import os
 import json
 import re
 import uuid
+import platform
+import shutil
 
 from prompts.DNA import get_manager_prompt
 
+IS_WINDOWS = platform.system() == "Windows"
+
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 SESSIONS_DIR = os.path.join(PROJECT_ROOT, "sessions")
+
+# On Windows, find the full path to claude so we don't need shell=True
+# (which has an 8191 char command line limit via cmd.exe)
+CLAUDE_CMD = "claude"
+if IS_WINDOWS:
+    _claude_path = shutil.which("claude") or shutil.which("claude.cmd")
+    if _claude_path:
+        CLAUDE_CMD = _claude_path
 
 
 def _get_session_id(carbon_id):
@@ -35,7 +47,7 @@ def _write_prompt_file(carbon_id, prompt):
     """Write the system prompt to a file and return the path."""
     prompt_file = os.path.join(SESSIONS_DIR, f"{carbon_id}_prompt.md")
     os.makedirs(SESSIONS_DIR, exist_ok=True)
-    with open(prompt_file, "w") as f:
+    with open(prompt_file, "w", encoding="utf-8") as f:
         f.write(prompt)
     return prompt_file
 
@@ -48,7 +60,7 @@ def claude_code(text, carbon_id):
 
     # Try resuming existing session first
     cmd = [
-        "claude", "-p",
+        CLAUDE_CMD, "-p",
         "--resume", session_id,
         "--system-prompt-file", prompt_file,
         "--dangerously-skip-permissions",
@@ -69,7 +81,7 @@ def claude_code(text, carbon_id):
 
     # Fall back to starting with session-id (new session with that ID)
     cmd_fallback = [
-        "claude", "-p",
+        CLAUDE_CMD, "-p",
         "--session-id", session_id,
         "--system-prompt-file", prompt_file,
         "--dangerously-skip-permissions",
