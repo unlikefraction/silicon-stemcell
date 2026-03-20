@@ -6,8 +6,8 @@ set -euo pipefail
 # curl -fsSL https://raw.githubusercontent.com/unlikefraction/silicon-stemcell/main/install.sh | bash
 # ─────────────────────────────────────────────────────────────
 
-REPO_URL="https://github.com/unlikefraction/silicon.git"
-REPO_ZIP="https://github.com/unlikefraction/silicon/archive/refs/heads/main.zip"
+REPO_URL="https://github.com/unlikefraction/silicon-stemcell.git"
+REPO_ZIP="https://github.com/unlikefraction/silicon-stemcell/archive/refs/heads/main.zip"
 REGISTRY_DIR="$HOME/.silicon"
 REGISTRY_FILE="$REGISTRY_DIR/registry.json"
 BIN_DIR="$REGISTRY_DIR/bin"
