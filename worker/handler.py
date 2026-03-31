@@ -5,6 +5,8 @@ import time
 import signal
 import platform
 import shutil
+import uuid
+from datetime import datetime, timezone
 
 from prompts.DNA import get_worker_prompt
 
@@ -22,6 +24,7 @@ OUTPUTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs"
 ACTIVE_FILE = os.path.join(OUTPUTS_DIR, "_active_workers.json")
 BROWSER_QUEUE_FILE = os.path.join(OUTPUTS_DIR, "_browser_queue.json")
 ARCHIVE_META_FILE = os.path.join(OUTPUTS_DIR, "_archive_meta.json")
+WORKER_REGISTRY_FILE = os.path.join(OUTPUTS_DIR, "_worker_registry.json")
 
 WORKER_DIR = os.path.dirname(os.path.abspath(__file__))
 BROWSER_WORKER_MODEL = "sonnet"
@@ -84,8 +87,93 @@ def _save_archive_meta(meta):
         json.dump(meta, f, indent=2)
 
 
-def _output_path(worker_id):
-    return os.path.join(OUTPUTS_DIR, f"{worker_id}.txt")
+def _load_worker_registry():
+    if os.path.exists(WORKER_REGISTRY_FILE):
+        try:
+            with open(WORKER_REGISTRY_FILE) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, ValueError):
+            return {}
+    return {}
+
+
+def _save_worker_registry(registry):
+    os.makedirs(OUTPUTS_DIR, exist_ok=True)
+    with open(WORKER_REGISTRY_FILE, "w") as f:
+        json.dump(registry, f, indent=2)
+
+
+def _utc_timestamp_slug():
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+
+
+def _run_output_path(worker_id, run_id):
+    return os.path.join(OUTPUTS_DIR, f"{worker_id}-{run_id}.txt")
+
+
+def _make_archive_id(worker_id, run_id):
+    return f"{worker_id}-{run_id}"
+
+
+def _get_worker_record(worker_id):
+    return _load_worker_registry().get(worker_id)
+
+
+def _create_worker_record(worker_id, worker_type, carbon_id, incognito=False):
+    registry = _load_worker_registry()
+    if worker_id in registry:
+        return None, f"Error: Worker '{worker_id}' already exists. Use worker/message to prompt it again."
+
+    now = time.time()
+    record = {
+        "worker_id": worker_id,
+        "session_uuid": str(uuid.uuid4()),
+        "worker_type": worker_type,
+        "carbon_id": carbon_id,
+        "created_at": now,
+        "last_used_at": now,
+        "last_run_id": "",
+        "incognito": incognito,
+    }
+    registry[worker_id] = record
+    _save_worker_registry(registry)
+    return record, ""
+
+
+def _update_worker_record(worker_id, **updates):
+    registry = _load_worker_registry()
+    if worker_id not in registry:
+        return
+    registry[worker_id].update(updates)
+    _save_worker_registry(registry)
+
+
+def _archive_active_output(worker_id, worker_info, carbon_id):
+    output_path = worker_info.get("output_path")
+    if not output_path or not os.path.exists(output_path):
+        return ""
+
+    run_id = worker_info.get("run_id") or _utc_timestamp_slug()
+    archive_id = _make_archive_id(worker_id, run_id)
+    archive_path = os.path.join(OUTPUTS_DIR, f"{archive_id}.txt")
+
+    if os.path.abspath(output_path) != os.path.abspath(archive_path):
+        os.rename(output_path, archive_path)
+
+    meta = _load_archive_meta()
+    meta[archive_id] = {
+        "worker_id": worker_id,
+        "run_id": run_id,
+        "session_uuid": worker_info.get("session_uuid", ""),
+        "carbon_id": carbon_id,
+        "worker_type": worker_info.get("worker_type", "unknown"),
+        "task": worker_info.get("task", ""),
+        "started_at": worker_info.get("started"),
+        "archived_at": time.time(),
+        "incognito": worker_info.get("incognito", False),
+    }
+    _save_archive_meta(meta)
+    return archive_id
 
 
 # --- Internal helpers ---
@@ -177,10 +265,16 @@ def sweep_orphaned_daemons():
     return cleaned
 
 
-def _launch_worker_process(worker_id, task, worker_type, carbon_id, incognito=False):
+def _launch_worker_process(worker_id, task, worker_type, carbon_id, incognito=False, resume=False):
     """Actually launch the claude process for a worker. Returns status string."""
     os.makedirs(OUTPUTS_DIR, exist_ok=True)
-    output_path = _output_path(worker_id)
+    worker_record = _get_worker_record(worker_id)
+    if not worker_record:
+        return f"Error: Worker '{worker_id}' is not registered."
+
+    session_uuid = worker_record["session_uuid"]
+    run_id = _utc_timestamp_slug()
+    output_path = _run_output_path(worker_id, run_id)
 
     system_prompt, err = get_worker_prompt(worker_type)
     if err:
@@ -190,6 +284,7 @@ def _launch_worker_process(worker_id, task, worker_type, carbon_id, incognito=Fa
 
     cmd = [
         CLAUDE_CMD, "-p",
+        "--resume" if resume else "--session-id", session_uuid,
         prompt_flag, system_prompt,
         "--dangerously-skip-permissions",
         "--output-format=stream-json",
@@ -229,11 +324,14 @@ def _launch_worker_process(worker_id, task, worker_type, carbon_id, incognito=Fa
         "carbon_id": carbon_id,
         "output_path": output_path,
         "incognito": incognito,
+        "session_uuid": session_uuid,
+        "run_id": run_id,
     }
     _save_active(active)
+    _update_worker_record(worker_id, last_used_at=time.time(), last_run_id=run_id, incognito=incognito)
 
     mode = "incognito" if incognito else "profiled"
-    return f"Done. Worker '{worker_id}' ({worker_type}, {mode}) started (pid: {process.pid})"
+    return f"Done. Worker '{worker_id}' ({worker_type}, {mode}) started (pid: {process.pid}, run: {run_id})"
 
 
 def _process_browser_queue():
@@ -252,13 +350,15 @@ def _process_browser_queue():
     worker_id = next_job["worker_id"]
     task = next_job["task"]
     carbon_id = next_job.get("carbon_id", "unknown")
-
-    # Check the output file doesn't already exist
-    output_path = _output_path(worker_id)
-    if os.path.exists(output_path):
-        return f"Error: Worker '{worker_id}' output file already exists when dequeuing.", carbon_id
-
-    result = _launch_worker_process(worker_id, task, "browser", carbon_id)
+    incognito = next_job.get("incognito", False)
+    result = _launch_worker_process(
+        worker_id,
+        task,
+        "browser",
+        carbon_id,
+        incognito=incognito,
+        resume=next_job.get("resume", False),
+    )
     return f"[Browser Queue] Dequeued and started: {result}", carbon_id
 
 
@@ -267,10 +367,6 @@ def _process_browser_queue():
 def start_browser_worker(worker_id, task, carbon_id, incognito=False):
     """Start a browser worker. Profiled workers queue; incognito workers run immediately."""
     os.makedirs(OUTPUTS_DIR, exist_ok=True)
-    output_path = _output_path(worker_id)
-
-    if os.path.exists(output_path):
-        return f"Error: Worker '{worker_id}' already has an output file. It may still be active."
 
     active = _load_active()
     if worker_id in active:
@@ -278,7 +374,7 @@ def start_browser_worker(worker_id, task, carbon_id, incognito=False):
 
     # Incognito workers run immediately in parallel — no queuing
     if incognito:
-        return _launch_worker_process(worker_id, task, "browser", carbon_id, incognito=True)
+        return _launch_worker_process(worker_id, task, "browser", carbon_id, incognito=True, resume=False)
 
     # --- Profiled worker: queue if another profiled browser is active ---
     queue = _load_browser_queue()
@@ -286,7 +382,7 @@ def start_browser_worker(worker_id, task, carbon_id, incognito=False):
         return f"Error: Worker '{worker_id}' is already in the browser queue."
 
     if not _is_profiled_browser_active():
-        return _launch_worker_process(worker_id, task, "browser", carbon_id, incognito=False)
+        return _launch_worker_process(worker_id, task, "browser", carbon_id, incognito=False, resume=False)
 
     # Queue it
     queue.append({
@@ -294,6 +390,8 @@ def start_browser_worker(worker_id, task, carbon_id, incognito=False):
         "task": task,
         "carbon_id": carbon_id,
         "queued_at": time.time(),
+        "incognito": incognito,
+        "resume": False,
     })
     _save_browser_queue(queue)
 
@@ -304,39 +402,35 @@ def start_browser_worker(worker_id, task, carbon_id, incognito=False):
 def start_terminal_worker(worker_id, task, carbon_id):
     """Start a terminal worker. Runs in parallel with other terminal workers."""
     os.makedirs(OUTPUTS_DIR, exist_ok=True)
-    output_path = _output_path(worker_id)
-
-    if os.path.exists(output_path):
-        return f"Error: Worker '{worker_id}' already has an output file. It may still be active."
 
     active = _load_active()
     if worker_id in active:
         return f"Error: Worker '{worker_id}' is already active."
 
-    return _launch_worker_process(worker_id, task, "terminal", carbon_id)
+    return _launch_worker_process(worker_id, task, "terminal", carbon_id, resume=False)
 
 
 def start_writer_worker(worker_id, task, carbon_id):
     """Start a writer worker. Runs in parallel with other workers."""
     os.makedirs(OUTPUTS_DIR, exist_ok=True)
-    output_path = _output_path(worker_id)
-
-    if os.path.exists(output_path):
-        return f"Error: Worker '{worker_id}' already has an output file. It may still be active."
 
     active = _load_active()
     if worker_id in active:
         return f"Error: Worker '{worker_id}' is already active."
 
-    return _launch_worker_process(worker_id, task, "writer", carbon_id)
+    return _launch_worker_process(worker_id, task, "writer", carbon_id, resume=False)
 
 
 def start_worker(worker_id, task, worker_type, carbon_id, incognito=False):
-    """Route to the correct worker start function based on type."""
+    """Create and start a new logical worker."""
     if not worker_type:
         return "Error: worker_type is required. Available types: browser, terminal, writer"
 
     worker_type = worker_type.lower()
+    _, err = _create_worker_record(worker_id, worker_type, carbon_id, incognito=incognito)
+    if err:
+        return err
+
     if worker_type == "browser":
         return start_browser_worker(worker_id, task, carbon_id, incognito=incognito)
     elif worker_type == "terminal":
@@ -344,28 +438,81 @@ def start_worker(worker_id, task, worker_type, carbon_id, incognito=False):
     elif worker_type == "writer":
         return start_writer_worker(worker_id, task, carbon_id)
     else:
+        registry = _load_worker_registry()
+        registry.pop(worker_id, None)
+        _save_worker_registry(registry)
         return f"Error: invalid worker_type '{worker_type}'. Available types: browser, terminal, writer"
+
+
+def message_worker(worker_id, task, carbon_id):
+    """Run another prompt on an existing logical worker."""
+    worker_record = _get_worker_record(worker_id)
+    if not worker_record:
+        return f"Error: Worker '{worker_id}' does not exist. Create it first with worker/new."
+
+    if worker_record.get("carbon_id") != carbon_id:
+        return f"Error: Worker '{worker_id}' does not belong to you."
+
+    worker_type = worker_record.get("worker_type", "").lower()
+    incognito = worker_record.get("incognito", False)
+
+    active = _load_active()
+    if worker_id in active:
+        return f"Error: Worker '{worker_id}' is already active."
+
+    queue = _load_browser_queue()
+    if any(q["worker_id"] == worker_id for q in queue):
+        return f"Error: Worker '{worker_id}' is already in the browser queue."
+
+    if worker_type == "browser":
+        if incognito:
+            return _launch_worker_process(worker_id, task, "browser", carbon_id, incognito=True, resume=True)
+        if not _is_profiled_browser_active():
+            return _launch_worker_process(worker_id, task, "browser", carbon_id, incognito=False, resume=True)
+        queue.append({
+            "worker_id": worker_id,
+            "task": task,
+            "carbon_id": carbon_id,
+            "queued_at": time.time(),
+            "incognito": False,
+            "resume": True,
+        })
+        _save_browser_queue(queue)
+        position = len(queue)
+        return f"Done. Worker '{worker_id}' (browser) queued at position {position}. Will resume when current profiled browser worker finishes."
+    if worker_type == "terminal":
+        return _launch_worker_process(worker_id, task, "terminal", carbon_id, resume=True)
+    if worker_type == "writer":
+        return _launch_worker_process(worker_id, task, "writer", carbon_id, resume=True)
+    return f"Error: Worker '{worker_id}' has invalid worker_type '{worker_type}'."
 
 
 # --- Public API: querying, stopping, listing ---
 
 def get_worker_status(worker_id, carbon_id):
-    """Get the current status and output of a running worker. Only if it belongs to this carbon."""
+    """Get status for a logical worker."""
+    worker_record = _get_worker_record(worker_id)
+    if not worker_record:
+        return f"Error: Worker '{worker_id}' not found."
+    if worker_record.get("carbon_id") != carbon_id:
+        return f"Error: Worker '{worker_id}' does not belong to you."
+
     # Check if it's in the browser queue
     queue = _load_browser_queue()
     for i, q in enumerate(queue):
         if q["worker_id"] == worker_id:
-            if q.get("carbon_id") != carbon_id:
-                return f"Error: Worker '{worker_id}' does not belong to you."
             return f"Worker '{worker_id}' status: queued (position {i+1} in browser queue)"
 
     active = _load_active()
-    if worker_id in active and active[worker_id].get("carbon_id") != carbon_id:
-        return f"Error: Worker '{worker_id}' does not belong to you."
+    if worker_id not in active:
+        archive_id = worker_record.get("last_archive_id", "")
+        if archive_id:
+            return f"Worker '{worker_id}' is idle. Last archived run: {archive_id}"
+        return f"Worker '{worker_id}' is idle. No archived runs yet."
 
-    output_path = _output_path(worker_id)
-    if not os.path.exists(output_path):
-        return f"Error: Worker '{worker_id}' not found."
+    output_path = active[worker_id].get("output_path")
+    if not output_path or not os.path.exists(output_path):
+        return f"Worker '{worker_id}' is active, but its output file is missing."
 
     with open(output_path) as f:
         raw = f.read()
@@ -441,22 +588,15 @@ def stop_worker(worker_id, carbon_id):
     except Exception:
         pass
 
-    output_path = _output_path(worker_id)
-    if os.path.exists(output_path):
-        timestamp = int(time.time())
-        archive_id = f"{worker_id}-{timestamp}"
-        archive_path = os.path.join(OUTPUTS_DIR, f"{archive_id}.txt")
-        os.rename(output_path, archive_path)
+    archive_id = _archive_active_output(worker_id, worker_info, carbon_id)
+    queue_result, queue_carbon_id = _process_browser_queue()
+    if archive_id:
+        _update_worker_record(worker_id, last_archive_id=archive_id, last_used_at=time.time())
+        suffix = f" {queue_result}" if queue_result and queue_carbon_id == carbon_id else ""
+        return f"Done. Worker '{worker_id}' stopped. Output archived as '{archive_id}'{suffix}"
 
-        meta = _load_archive_meta()
-        meta[archive_id] = {"carbon_id": carbon_id, "worker_type": worker_type, "task": worker_info.get("task", ""), "archived_at": timestamp}
-        _save_archive_meta(meta)
-
-        return f"Done. Worker '{worker_id}' stopped. Output archived as '{archive_id}'"
-
-    # Trigger queue processing in case this was a profiled browser worker
-    _process_browser_queue()
-    return f"Done. Worker '{worker_id}' stopped."
+    suffix = f" {queue_result}" if queue_result and queue_carbon_id == carbon_id else ""
+    return f"Done. Worker '{worker_id}' stopped.{suffix}"
 
 
 def list_active(carbon_id):
@@ -531,7 +671,7 @@ def read_archive(archive_id, carbon_id):
 
 def _has_result_event(output_path):
     """Check if the worker output file contains a result event (meaning it's done)."""
-    if not os.path.exists(output_path):
+    if not output_path or not os.path.exists(output_path):
         return False
     try:
         with open(output_path) as f:
@@ -564,12 +704,8 @@ def check_completed_workers():
 
     active = _load_active()
     completed_by_carbon = {}
-    had_browser_completion = False
-    meta = _load_archive_meta()
-    meta_changed = False
-
     for worker_id in list(active.keys()):
-        output_path = _output_path(worker_id)
+        output_path = active[worker_id].get("output_path")
 
         if not _has_result_event(output_path):
             continue
@@ -577,33 +713,19 @@ def check_completed_workers():
         worker_type = active[worker_id].get("worker_type", "unknown")
         carbon_id = active[worker_id].get("carbon_id", "unknown")
 
-        if worker_type == "browser" and not active[worker_id].get("incognito", False):
-            had_browser_completion = True
-
         # Clean up silicon-browser session for incognito workers
         _cleanup_silicon_browser_session(worker_id, active[worker_id])
 
         # Worker is done - read and archive
         result_text = ""
-        archive_id = worker_id
-        if os.path.exists(output_path):
+        archive_id = ""
+        if output_path and os.path.exists(output_path):
             with open(output_path) as f:
                 raw = f.read()
             result_text = _parse_worker_output(raw)
-
-            timestamp = int(time.time())
-            archive_id = f"{worker_id}-{timestamp}"
-            archive_path = os.path.join(OUTPUTS_DIR, f"{archive_id}.txt")
-            os.rename(output_path, archive_path)
-
-            # Store archive metadata
-            meta[archive_id] = {
-                "carbon_id": carbon_id,
-                "worker_type": worker_type,
-                "task": active[worker_id].get("task", ""),
-                "archived_at": timestamp,
-            }
-            meta_changed = True
+            archive_id = _archive_active_output(worker_id, active[worker_id], carbon_id)
+            if archive_id:
+                _update_worker_record(worker_id, last_archive_id=archive_id, last_used_at=time.time())
 
         del active[worker_id]
 
@@ -627,8 +749,6 @@ def check_completed_workers():
 
     if completed_by_carbon:
         _save_active(active)
-    if meta_changed:
-        _save_archive_meta(meta)
 
     # Always try to start the next queued browser worker
     queue_result, queue_carbon_id = _process_browser_queue()

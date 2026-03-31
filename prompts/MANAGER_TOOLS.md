@@ -11,11 +11,29 @@ Output should be a valid JSON and it should be a output that can then be interpr
 {
     "tool": "worker/worker_type", # available: worker/browser; worker/terminal; worker/writer;
     "type": "new",
-    "worker-id": "readable-and-descriptive-worker-identifier", # used to know which worker completed its task and to query the status of an active worker
+    "worker-id": "readable-and-descriptive-worker-identifier", # stable logical worker handle. the system creates and persists a hidden claude session UUID behind this id.
     "task": "A very detailed description of the task",
     "incognito": false, # (optional, browser worker only) default false. true = fresh browser, no login state, runs in parallel. false = uses shared "silicon" profile with saved login state, queued.
     "checkback_in": 5 # in minutes. system will auto-check on the worker after this many minutes and send you its status. this is the estimated time of completion of the running worker, ideally the worker should have finished and returned back to you, but if doesn't, its a reminder to check on it if needed.
 }
+
+IMPORTANT:
+- `type: "new"` creates a new logical worker. Reusing an existing `worker-id` with `new` is an error.
+- Once a worker finishes, it stays available for future prompts under the same `worker-id`.
+- A worker id can only have one active run at a time.
+- Completed and stopped runs are archived per run, not per worker.
+
+### Message an existing Worker again
+Use this when a worker already exists and you want to continue with the same worker after it has finished a previous run.
+{
+    "tool": "worker",
+    "type": "message",
+    "worker-id": "readable-and-descriptive-worker-identifier",
+    "message": "Continue from where you left off and do this next thing"
+}
+
+This resumes the same underlying worker session tied to that `worker-id`.
+If that worker is currently active or queued, you'll get an error back instead of starting another concurrent run.
 
 About Worker Types:
 1. worker/browser: Access to a headless browser (silicon-browser CLI) + Access to Terminal + Access to Direct Web Search. Use this when you need to do things on the browser or do Web Search.
@@ -44,12 +62,12 @@ Outputs all the things the worker has done, thought and executed till now.
 }
 
 ### Get complete output of an archived worker
-Once the worker is completed, its archived with timestamp appended to the identifier you gave it.
+Once a worker run is completed, that run is archived with a timestamp appended to the worker identifier you gave it.
 Use this tool to investigate how a worker worked and all the things it did during its execution.
 {
     "tool": "worker", # worker type ignored
     "type": "read_archive",
-    "worker-id": "readable-worker-identifier-archivetimestamp", # worker id of the archived worker to query
+    "worker-id": "readable-worker-identifier-timestamp", # archive id of the specific archived run to query
 }
 
 ### Stop a running worker

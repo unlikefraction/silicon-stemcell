@@ -18,6 +18,7 @@ from core.messages import send_manager_message
 from core.carbon_id import change_carbon_id
 from worker.handler import (
     start_worker,
+    message_worker,
     get_worker_status,
     stop_worker,
     list_active,
@@ -208,6 +209,15 @@ def execute_single_tool(tool_spec, carbon_id):
                     status += f" (checkback setup failed: {e})"
 
             return f"Tool 'worker/new' ({worker_type}, {worker_id}): {status}"
+
+        elif action_type == "message":
+            task = tool_spec.get("message", "")
+            if not worker_id:
+                return "Tool 'worker/message': Error: worker-id is required"
+            if not task:
+                return f"Tool 'worker/message' ({worker_id}): Error: message is required"
+            status = message_worker(worker_id, task, carbon_id)
+            return f"Tool 'worker/message' ({worker_id}): {status}"
 
         elif action_type == "checkback":
             checkback_in = tool_spec.get("checkback_in")
