@@ -12,6 +12,7 @@ core/telegram/state.json
 worker/outputs/*.txt
 worker/outputs/_active_workers.json
 worker/outputs/_browser_queue.json
+worker/outputs/_worker_registry.json
 
 # Session files (generated at runtime)
 sessions/

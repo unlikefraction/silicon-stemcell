@@ -1,10 +1,10 @@
-import subprocess
-import os
 import json
-import time
-import signal
+import os
 import platform
 import shutil
+import signal
+import subprocess
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -12,24 +12,30 @@ from prompts.DNA import get_worker_prompt
 
 IS_WINDOWS = platform.system() == "Windows"
 
-# On Windows, find the full path to claude so we don't need shell=True
 CLAUDE_CMD = "claude"
+CODEX_CMD = "codex"
 if IS_WINDOWS:
     _claude_path = shutil.which("claude") or shutil.which("claude.cmd")
     if _claude_path:
         CLAUDE_CMD = _claude_path
+    _codex_path = shutil.which("codex") or shutil.which("codex.cmd")
+    if _codex_path:
+        CODEX_CMD = _codex_path
 
-OUTPUTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs")
+WORKER_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(WORKER_DIR)
+OUTPUTS_DIR = os.path.join(WORKER_DIR, "outputs")
+SILICON_CONFIG_FILE = os.path.join(PROJECT_ROOT, "silicon.json")
 
 ACTIVE_FILE = os.path.join(OUTPUTS_DIR, "_active_workers.json")
 BROWSER_QUEUE_FILE = os.path.join(OUTPUTS_DIR, "_browser_queue.json")
 ARCHIVE_META_FILE = os.path.join(OUTPUTS_DIR, "_archive_meta.json")
 WORKER_REGISTRY_FILE = os.path.join(OUTPUTS_DIR, "_worker_registry.json")
 
-WORKER_DIR = os.path.dirname(os.path.abspath(__file__))
 BROWSER_WORKER_MODEL = "sonnet"
+TERMINAL_PROVIDER_FALLBACK = ["claude"]
+VALID_TERMINAL_PROVIDERS = {"claude", "chatgpt"}
 
-# silicon-browser profile name (read from env.py, default 'silicon')
 try:
     from env import BROWSER_PROFILE as _BROWSER_PROFILE
 except ImportError:
@@ -87,14 +93,47 @@ def _save_archive_meta(meta):
         json.dump(meta, f, indent=2)
 
 
+def _migrate_worker_record(worker_id, record):
+    changed = False
+
+    if "session_uuid" in record and "session_id" not in record:
+        record["session_id"] = record.pop("session_uuid")
+        changed = True
+
+    if "provider" not in record:
+        if record.get("worker_type") in ("browser", "writer"):
+            record["provider"] = "claude"
+            changed = True
+        elif record.get("session_id"):
+            record["provider"] = "claude"
+            changed = True
+
+    if "worker_id" not in record:
+        record["worker_id"] = worker_id
+        changed = True
+
+    return record, changed
+
+
 def _load_worker_registry():
-    if os.path.exists(WORKER_REGISTRY_FILE):
-        try:
-            with open(WORKER_REGISTRY_FILE) as f:
-                return json.load(f)
-        except (json.JSONDecodeError, ValueError):
-            return {}
-    return {}
+    if not os.path.exists(WORKER_REGISTRY_FILE):
+        return {}
+
+    try:
+        with open(WORKER_REGISTRY_FILE) as f:
+            registry = json.load(f)
+    except (json.JSONDecodeError, ValueError):
+        return {}
+
+    changed = False
+    for worker_id, record in registry.items():
+        _, record_changed = _migrate_worker_record(worker_id, record)
+        changed = changed or record_changed
+
+    if changed:
+        _save_worker_registry(registry)
+
+    return registry
 
 
 def _save_worker_registry(registry):
@@ -127,13 +166,15 @@ def _create_worker_record(worker_id, worker_type, carbon_id, incognito=False):
     now = time.time()
     record = {
         "worker_id": worker_id,
-        "session_uuid": str(uuid.uuid4()),
         "worker_type": worker_type,
         "carbon_id": carbon_id,
         "created_at": now,
         "last_used_at": now,
         "last_run_id": "",
+        "last_archive_id": "",
         "incognito": incognito,
+        "provider": "claude" if worker_type in ("browser", "writer") else "",
+        "session_id": str(uuid.uuid4()) if worker_type in ("browser", "writer") else "",
     }
     registry[worker_id] = record
     _save_worker_registry(registry)
@@ -146,6 +187,38 @@ def _update_worker_record(worker_id, **updates):
         return
     registry[worker_id].update(updates)
     _save_worker_registry(registry)
+
+
+def _read_silicon_config():
+    if not os.path.exists(SILICON_CONFIG_FILE):
+        return {}
+    try:
+        with open(SILICON_CONFIG_FILE) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, ValueError):
+        return {}
+
+
+def _get_terminal_provider_order():
+    config = _read_silicon_config()
+    raw = config.get("workers", {}).get("terminal")
+
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return TERMINAL_PROVIDER_FALLBACK[:]
+
+    providers = []
+    seen = set()
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        provider = item.strip().lower()
+        if provider in VALID_TERMINAL_PROVIDERS and provider not in seen:
+            seen.add(provider)
+            providers.append(provider)
+
+    return providers or TERMINAL_PROVIDER_FALLBACK[:]
 
 
 def _archive_active_output(worker_id, worker_info, carbon_id):
@@ -164,7 +237,8 @@ def _archive_active_output(worker_id, worker_info, carbon_id):
     meta[archive_id] = {
         "worker_id": worker_id,
         "run_id": run_id,
-        "session_uuid": worker_info.get("session_uuid", ""),
+        "provider": worker_info.get("provider", ""),
+        "session_id": worker_info.get("session_id", ""),
         "carbon_id": carbon_id,
         "worker_type": worker_info.get("worker_type", "unknown"),
         "task": worker_info.get("task", ""),
@@ -179,7 +253,6 @@ def _archive_active_output(worker_id, worker_info, carbon_id):
 # --- Internal helpers ---
 
 def _is_profiled_browser_active():
-    """Check if a profiled (non-incognito) browser worker is currently running."""
     active = _load_active()
     for info in active.values():
         if info.get("worker_type") == "browser" and not info.get("incognito", False):
@@ -188,7 +261,6 @@ def _is_profiled_browser_active():
 
 
 def _get_silicon_browser_socket_dir():
-    """Return the silicon-browser socket directory (mirrors daemon.js getSocketDir logic)."""
     override = os.environ.get("SILICON_BROWSER_SOCKET_DIR")
     if override:
         return override
@@ -202,7 +274,6 @@ def _get_silicon_browser_socket_dir():
 
 
 def _kill_incognito_daemon_by_pid(worker_id):
-    """Kill an incognito daemon directly via its PID file (fallback when 'close' fails)."""
     socket_dir = _get_silicon_browser_socket_dir()
     pid_file = os.path.join(socket_dir, f"incognito-{worker_id}.pid")
     if not os.path.exists(pid_file):
@@ -213,7 +284,6 @@ def _kill_incognito_daemon_by_pid(worker_id):
         os.kill(pid, signal.SIGTERM)
     except Exception:
         pass
-    # Clean up stale files regardless
     for ext in (".pid", ".sock", ".stream"):
         try:
             fpath = os.path.join(socket_dir, f"incognito-{worker_id}{ext}")
@@ -224,14 +294,14 @@ def _kill_incognito_daemon_by_pid(worker_id):
 
 
 def _cleanup_silicon_browser_session(worker_id, worker_info):
-    """Close the silicon-browser daemon session after an incognito browser worker finishes."""
     if worker_info.get("worker_type") != "browser":
         return
     if worker_info.get("incognito", False):
         try:
             result = subprocess.run(
                 ["silicon-browser", "--session", f"incognito-{worker_id}", "close"],
-                capture_output=True, timeout=10,
+                capture_output=True,
+                timeout=10,
             )
             if result.returncode != 0:
                 _kill_incognito_daemon_by_pid(worker_id)
@@ -240,12 +310,6 @@ def _cleanup_silicon_browser_session(worker_id, worker_info):
 
 
 def sweep_orphaned_daemons():
-    """Kill any incognito daemons whose worker IDs are no longer in active workers.
-
-    Call this at startup and periodically to prevent daemon accumulation from
-    workers that crashed or were killed before cleanup could run.
-    Returns a list of worker_ids that were cleaned up.
-    """
     socket_dir = _get_silicon_browser_socket_dir()
     if not os.path.exists(socket_dir):
         return []
@@ -265,56 +329,112 @@ def sweep_orphaned_daemons():
     return cleaned
 
 
-def _launch_worker_process(worker_id, task, worker_type, carbon_id, incognito=False, resume=False):
-    """Actually launch the claude process for a worker. Returns status string."""
-    os.makedirs(OUTPUTS_DIR, exist_ok=True)
-    worker_record = _get_worker_record(worker_id)
-    if not worker_record:
-        return f"Error: Worker '{worker_id}' is not registered."
-
-    session_uuid = worker_record["session_uuid"]
-    run_id = _utc_timestamp_slug()
-    output_path = _run_output_path(worker_id, run_id)
-
-    system_prompt, err = get_worker_prompt(worker_type)
-    if err:
-        return err
-
-    prompt_flag = "--append-system-prompt" if worker_type == "terminal" else "--system-prompt"
-
-    cmd = [
-        CLAUDE_CMD, "-p",
-        "--resume" if resume else "--session-id", session_uuid,
-        prompt_flag, system_prompt,
-        "--dangerously-skip-permissions",
-        "--output-format=stream-json",
-        "--verbose",
-    ]
-    if worker_type == "browser":
-        cmd.extend(["--model", BROWSER_WORKER_MODEL])
-
-    cmd.append(task)
-
-    # Set up environment for silicon-browser
-    env = os.environ.copy()
-    if worker_type == "browser":
-        if incognito:
-            env["SILICON_BROWSER_SESSION"] = f"incognito-{worker_id}"
-        else:
-            env["SILICON_BROWSER_SESSION"] = SILICON_BROWSER_PROFILE
-
-    output_file = open(output_path, "w", encoding="utf-8")
+def _get_popen_kwargs(env, output_file):
     popen_kwargs = dict(
         stdout=output_file,
         stderr=subprocess.PIPE,
         env=env,
+        text=True,
+        cwd=PROJECT_ROOT,
     )
     if IS_WINDOWS:
         popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         popen_kwargs["preexec_fn"] = os.setsid
-    process = subprocess.Popen(cmd, **popen_kwargs)
+    return popen_kwargs
 
+
+def _terminate_process(process):
+    try:
+        if IS_WINDOWS:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)], capture_output=True, timeout=10)
+        else:
+            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+    except Exception:
+        pass
+
+
+def _read_text_file(path):
+    if not path or not os.path.exists(path):
+        return ""
+    try:
+        with open(path) as f:
+            return f.read()
+    except Exception:
+        return ""
+
+
+def _extract_json_events(raw):
+    events = []
+    if not raw.strip():
+        return events
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            events.append(json.loads(line))
+        except (json.JSONDecodeError, ValueError):
+            continue
+    return events
+
+
+def _extract_codex_session_id_from_raw(raw):
+    for event in _extract_json_events(raw):
+        if event.get("type") == "thread.started" and event.get("thread_id"):
+            return event["thread_id"]
+    return ""
+
+
+def _sync_codex_session_id(worker_id, worker_info=None):
+    if worker_info is None:
+        worker_info = _load_active().get(worker_id)
+    if not worker_info or worker_info.get("provider") != "chatgpt":
+        return ""
+
+    if worker_info.get("session_id"):
+        return worker_info["session_id"]
+
+    raw = _read_text_file(worker_info.get("output_path"))
+    session_id = _extract_codex_session_id_from_raw(raw)
+    if not session_id:
+        return ""
+
+    active = _load_active()
+    if worker_id in active:
+        active[worker_id]["session_id"] = session_id
+        _save_active(active)
+
+    _update_worker_record(worker_id, session_id=session_id)
+    return session_id
+
+
+def _wait_for_codex_session_id(worker_id, process, output_path, timeout_seconds=5.0):
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        raw = _read_text_file(output_path)
+        session_id = _extract_codex_session_id_from_raw(raw)
+        if session_id:
+            return session_id, ""
+
+        returncode = process.poll()
+        if returncode is not None:
+            stderr = ""
+            try:
+                if process.stderr:
+                    stderr = process.stderr.read().strip()
+            except Exception:
+                stderr = ""
+            raw_tail = raw.strip().splitlines()[-1] if raw.strip() else ""
+            detail = stderr or raw_tail or f"process exited with code {returncode}"
+            return "", detail
+
+        time.sleep(0.1)
+
+    return "", "Timed out waiting for Codex session id"
+
+
+def _record_active_run(worker_id, provider, session_id, process, task, worker_type, carbon_id, output_path, incognito, run_id):
     active = _load_active()
     active[worker_id] = {
         "pid": process.pid,
@@ -324,19 +444,133 @@ def _launch_worker_process(worker_id, task, worker_type, carbon_id, incognito=Fa
         "carbon_id": carbon_id,
         "output_path": output_path,
         "incognito": incognito,
-        "session_uuid": session_uuid,
+        "provider": provider,
+        "session_id": session_id,
         "run_id": run_id,
     }
     _save_active(active)
-    _update_worker_record(worker_id, last_used_at=time.time(), last_run_id=run_id, incognito=incognito)
+    _update_worker_record(
+        worker_id,
+        provider=provider,
+        session_id=session_id,
+        last_used_at=time.time(),
+        last_run_id=run_id,
+        incognito=incognito,
+    )
 
+
+def _launch_claude_worker_process(worker_id, task, worker_type, carbon_id, incognito=False, resume=False, session_id=""):
+    worker_record = _get_worker_record(worker_id)
+    if not worker_record:
+        return False, f"Error: Worker '{worker_id}' is not registered."
+
+    if not session_id:
+        session_id = worker_record.get("session_id") or str(uuid.uuid4())
+
+    run_id = _utc_timestamp_slug()
+    output_path = _run_output_path(worker_id, run_id)
+    system_prompt, err = get_worker_prompt(worker_type)
+    if err:
+        return False, err
+
+    prompt_flag = "--append-system-prompt" if worker_type == "terminal" else "--system-prompt"
+    cmd = [
+        CLAUDE_CMD, "-p",
+        "--resume" if resume else "--session-id", session_id,
+        prompt_flag, system_prompt,
+        "--dangerously-skip-permissions",
+        "--output-format=stream-json",
+        "--verbose",
+    ]
+    if worker_type == "browser":
+        cmd.extend(["--model", BROWSER_WORKER_MODEL])
+    cmd.append(task)
+
+    env = os.environ.copy()
+    if worker_type == "browser":
+        env["SILICON_BROWSER_SESSION"] = f"incognito-{worker_id}" if incognito else SILICON_BROWSER_PROFILE
+
+    output_file = open(output_path, "w", encoding="utf-8")
+    try:
+        process = subprocess.Popen(cmd, **_get_popen_kwargs(env, output_file))
+    except Exception as e:
+        output_file.close()
+        return False, f"Claude launch failed: {e}"
+    finally:
+        output_file.close()
+
+    _record_active_run(worker_id, "claude", session_id, process, task, worker_type, carbon_id, output_path, incognito, run_id)
     mode = "incognito" if incognito else "profiled"
-    return f"Done. Worker '{worker_id}' ({worker_type}, {mode}) started (pid: {process.pid}, run: {run_id})"
+    return True, f"Done. Worker '{worker_id}' ({worker_type}, {mode}, claude) started (pid: {process.pid}, run: {run_id})"
+
+
+def _launch_codex_terminal_worker_process(worker_id, task, carbon_id, resume=False, session_id=""):
+    worker_record = _get_worker_record(worker_id)
+    if not worker_record:
+        return False, f"Error: Worker '{worker_id}' is not registered."
+
+    run_id = _utc_timestamp_slug()
+    output_path = _run_output_path(worker_id, run_id)
+
+    if resume:
+        if not session_id:
+            session_id = worker_record.get("session_id", "")
+        if not session_id:
+            return False, f"Error: Worker '{worker_id}' has no saved chatgpt session id to resume."
+        cmd = [
+            CODEX_CMD, "exec", "resume", session_id, task,
+            "--json",
+            "--dangerously-bypass-approvals-and-sandbox",
+        ]
+    else:
+        cmd = [
+            CODEX_CMD, "exec", task,
+            "--json",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "-s", "danger-full-access",
+            "-C", PROJECT_ROOT,
+        ]
+
+    output_file = open(output_path, "w", encoding="utf-8")
+    try:
+        process = subprocess.Popen(cmd, **_get_popen_kwargs(os.environ.copy(), output_file))
+    except Exception as e:
+        output_file.close()
+        return False, f"ChatGPT launch failed: {e}"
+    finally:
+        output_file.close()
+
+    if not resume:
+        captured_session_id, detail = _wait_for_codex_session_id(worker_id, process, output_path)
+        if not captured_session_id:
+            _terminate_process(process)
+            return False, f"ChatGPT launch failed: {detail}"
+        session_id = captured_session_id
+
+    _record_active_run(worker_id, "chatgpt", session_id, process, task, "terminal", carbon_id, output_path, False, run_id)
+    return True, f"Done. Worker '{worker_id}' (terminal, chatgpt) started (pid: {process.pid}, run: {run_id})"
+
+
+def _launch_worker_process(worker_id, task, worker_type, carbon_id, incognito=False, resume=False, provider=None, session_id=""):
+    provider = (provider or "claude").lower()
+
+    if provider == "chatgpt":
+        if worker_type != "terminal":
+            return False, f"Error: provider 'chatgpt' is only supported for terminal workers."
+        return _launch_codex_terminal_worker_process(worker_id, task, carbon_id, resume=resume, session_id=session_id)
+
+    return _launch_claude_worker_process(
+        worker_id,
+        task,
+        worker_type,
+        carbon_id,
+        incognito=incognito,
+        resume=resume,
+        session_id=session_id,
+    )
 
 
 def _process_browser_queue():
-    """If no profiled browser worker is active, start the next one from the queue.
-    Returns (result_string_or_None, carbon_id_or_None)."""
     if _is_profiled_browser_active():
         return None, None
 
@@ -347,82 +581,124 @@ def _process_browser_queue():
     next_job = queue.pop(0)
     _save_browser_queue(queue)
 
-    worker_id = next_job["worker_id"]
-    task = next_job["task"]
-    carbon_id = next_job.get("carbon_id", "unknown")
-    incognito = next_job.get("incognito", False)
-    result = _launch_worker_process(
-        worker_id,
-        task,
+    ok, result = _launch_worker_process(
+        next_job["worker_id"],
+        next_job["task"],
         "browser",
-        carbon_id,
-        incognito=incognito,
+        next_job.get("carbon_id", "unknown"),
+        incognito=next_job.get("incognito", False),
         resume=next_job.get("resume", False),
+        provider="claude",
+        session_id=next_job.get("session_id", ""),
     )
-    return f"[Browser Queue] Dequeued and started: {result}", carbon_id
+    return f"[Browser Queue] Dequeued and started: {result}", next_job.get("carbon_id", "unknown")
 
 
 # --- Public API: starting workers ---
 
-def start_browser_worker(worker_id, task, carbon_id, incognito=False):
-    """Start a browser worker. Profiled workers queue; incognito workers run immediately."""
-    os.makedirs(OUTPUTS_DIR, exist_ok=True)
-
+def start_browser_worker(worker_id, task, carbon_id, incognito=False, resume=False):
     active = _load_active()
     if worker_id in active:
         return f"Error: Worker '{worker_id}' is already active."
 
-    # Incognito workers run immediately in parallel — no queuing
-    if incognito:
-        return _launch_worker_process(worker_id, task, "browser", carbon_id, incognito=True, resume=False)
+    worker_record = _get_worker_record(worker_id)
+    session_id = worker_record.get("session_id", "") if worker_record else ""
 
-    # --- Profiled worker: queue if another profiled browser is active ---
+    if incognito:
+        _, result = _launch_worker_process(
+            worker_id, task, "browser", carbon_id, incognito=True, resume=resume, provider="claude", session_id=session_id
+        )
+        return result
+
     queue = _load_browser_queue()
     if any(q["worker_id"] == worker_id for q in queue):
         return f"Error: Worker '{worker_id}' is already in the browser queue."
 
     if not _is_profiled_browser_active():
-        return _launch_worker_process(worker_id, task, "browser", carbon_id, incognito=False, resume=False)
+        _, result = _launch_worker_process(
+            worker_id, task, "browser", carbon_id, incognito=False, resume=resume, provider="claude", session_id=session_id
+        )
+        return result
 
-    # Queue it
     queue.append({
         "worker_id": worker_id,
         "task": task,
         "carbon_id": carbon_id,
         "queued_at": time.time(),
-        "incognito": incognito,
-        "resume": False,
+        "incognito": False,
+        "resume": resume,
+        "session_id": session_id,
     })
     _save_browser_queue(queue)
 
     position = len(queue)
-    return f"Done. Worker '{worker_id}' (browser) queued at position {position}. Will start when current profiled browser worker finishes."
+    action = "resume" if resume else "start"
+    return f"Done. Worker '{worker_id}' (browser) queued at position {position}. Will {action} when current profiled browser worker finishes."
 
 
-def start_terminal_worker(worker_id, task, carbon_id):
-    """Start a terminal worker. Runs in parallel with other terminal workers."""
-    os.makedirs(OUTPUTS_DIR, exist_ok=True)
-
+def start_terminal_worker(worker_id, task, carbon_id, resume=False):
     active = _load_active()
     if worker_id in active:
         return f"Error: Worker '{worker_id}' is already active."
 
-    return _launch_worker_process(worker_id, task, "terminal", carbon_id, resume=False)
+    worker_record = _get_worker_record(worker_id)
+    if not worker_record:
+        return f"Error: Worker '{worker_id}' is not registered."
+
+    if resume:
+        provider = worker_record.get("provider", "claude")
+        session_id = worker_record.get("session_id", "")
+        ok, result = _launch_worker_process(
+            worker_id,
+            task,
+            "terminal",
+            carbon_id,
+            resume=True,
+            provider=provider,
+            session_id=session_id,
+        )
+        return result
+
+    providers = _get_terminal_provider_order()
+    errors = []
+
+    for provider in providers:
+        session_id = worker_record.get("session_id", "") if worker_record.get("provider") == provider else ""
+        if provider == "claude" and not session_id:
+            session_id = str(uuid.uuid4())
+        ok, result = _launch_worker_process(
+            worker_id,
+            task,
+            "terminal",
+            carbon_id,
+            resume=False,
+            provider=provider,
+            session_id=session_id,
+        )
+        if ok:
+            return result
+        errors.append(f"{provider}: {result}")
+
+    registry = _load_worker_registry()
+    registry.pop(worker_id, None)
+    _save_worker_registry(registry)
+    return "Error: Could not start terminal worker. " + " | ".join(errors)
 
 
-def start_writer_worker(worker_id, task, carbon_id):
-    """Start a writer worker. Runs in parallel with other workers."""
-    os.makedirs(OUTPUTS_DIR, exist_ok=True)
-
+def start_writer_worker(worker_id, task, carbon_id, resume=False):
     active = _load_active()
     if worker_id in active:
         return f"Error: Worker '{worker_id}' is already active."
 
-    return _launch_worker_process(worker_id, task, "writer", carbon_id, resume=False)
+    worker_record = _get_worker_record(worker_id)
+    session_id = worker_record.get("session_id", "") if worker_record else ""
+    _, result = _launch_worker_process(
+        worker_id, task, "writer", carbon_id, resume=resume, provider="claude", session_id=session_id
+    )
+    return result
 
 
 def start_worker(worker_id, task, worker_type, carbon_id, incognito=False):
-    """Create and start a new logical worker."""
     if not worker_type:
         return "Error: worker_type is required. Available types: browser, terminal, writer"
 
@@ -432,24 +708,22 @@ def start_worker(worker_id, task, worker_type, carbon_id, incognito=False):
         return err
 
     if worker_type == "browser":
-        return start_browser_worker(worker_id, task, carbon_id, incognito=incognito)
-    elif worker_type == "terminal":
-        return start_terminal_worker(worker_id, task, carbon_id)
-    elif worker_type == "writer":
-        return start_writer_worker(worker_id, task, carbon_id)
-    else:
-        registry = _load_worker_registry()
-        registry.pop(worker_id, None)
-        _save_worker_registry(registry)
-        return f"Error: invalid worker_type '{worker_type}'. Available types: browser, terminal, writer"
+        return start_browser_worker(worker_id, task, carbon_id, incognito=incognito, resume=False)
+    if worker_type == "terminal":
+        return start_terminal_worker(worker_id, task, carbon_id, resume=False)
+    if worker_type == "writer":
+        return start_writer_worker(worker_id, task, carbon_id, resume=False)
+
+    registry = _load_worker_registry()
+    registry.pop(worker_id, None)
+    _save_worker_registry(registry)
+    return f"Error: invalid worker_type '{worker_type}'. Available types: browser, terminal, writer"
 
 
 def message_worker(worker_id, task, carbon_id):
-    """Run another prompt on an existing logical worker."""
     worker_record = _get_worker_record(worker_id)
     if not worker_record:
         return f"Error: Worker '{worker_id}' does not exist. Create it first with worker/new."
-
     if worker_record.get("carbon_id") != carbon_id:
         return f"Error: Worker '{worker_id}' does not belong to you."
 
@@ -465,39 +739,33 @@ def message_worker(worker_id, task, carbon_id):
         return f"Error: Worker '{worker_id}' is already in the browser queue."
 
     if worker_type == "browser":
-        if incognito:
-            return _launch_worker_process(worker_id, task, "browser", carbon_id, incognito=True, resume=True)
-        if not _is_profiled_browser_active():
-            return _launch_worker_process(worker_id, task, "browser", carbon_id, incognito=False, resume=True)
-        queue.append({
-            "worker_id": worker_id,
-            "task": task,
-            "carbon_id": carbon_id,
-            "queued_at": time.time(),
-            "incognito": False,
-            "resume": True,
-        })
-        _save_browser_queue(queue)
-        position = len(queue)
-        return f"Done. Worker '{worker_id}' (browser) queued at position {position}. Will resume when current profiled browser worker finishes."
+        return start_browser_worker(worker_id, task, carbon_id, incognito=incognito, resume=True)
     if worker_type == "terminal":
-        return _launch_worker_process(worker_id, task, "terminal", carbon_id, resume=True)
+        return start_terminal_worker(worker_id, task, carbon_id, resume=True)
     if worker_type == "writer":
-        return _launch_worker_process(worker_id, task, "writer", carbon_id, resume=True)
+        return start_writer_worker(worker_id, task, carbon_id, resume=True)
     return f"Error: Worker '{worker_id}' has invalid worker_type '{worker_type}'."
 
 
 # --- Public API: querying, stopping, listing ---
 
+def _is_process_running(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
 def get_worker_status(worker_id, carbon_id):
-    """Get status for a logical worker."""
     worker_record = _get_worker_record(worker_id)
     if not worker_record:
         return f"Error: Worker '{worker_id}' not found."
     if worker_record.get("carbon_id") != carbon_id:
         return f"Error: Worker '{worker_id}' does not belong to you."
 
-    # Check if it's in the browser queue
     queue = _load_browser_queue()
     for i, q in enumerate(queue):
         if q["worker_id"] == worker_id:
@@ -507,36 +775,30 @@ def get_worker_status(worker_id, carbon_id):
     if worker_id not in active:
         archive_id = worker_record.get("last_archive_id", "")
         if archive_id:
-            return f"Worker '{worker_id}' is idle. Last archived run: {archive_id}"
+            provider = worker_record.get("provider", "unknown")
+            return f"Worker '{worker_id}' is idle ({provider}). Last archived run: {archive_id}"
         return f"Worker '{worker_id}' is idle. No archived runs yet."
 
-    output_path = active[worker_id].get("output_path")
+    worker_info = active[worker_id]
+    if worker_info.get("provider") == "chatgpt":
+        _sync_codex_session_id(worker_id, worker_info)
+        worker_info = _load_active().get(worker_id, worker_info)
+
+    output_path = worker_info.get("output_path")
     if not output_path or not os.path.exists(output_path):
         return f"Worker '{worker_id}' is active, but its output file is missing."
 
     with open(output_path) as f:
         raw = f.read()
 
-    parsed = _parse_worker_output(raw)
-
-    pid = active.get(worker_id, {}).get("pid")
-    worker_type = active.get(worker_id, {}).get("worker_type", "unknown")
-
-    still_running = False
-    if pid:
-        try:
-            os.kill(pid, 0)
-            still_running = True
-        except (OSError, ProcessLookupError):
-            still_running = False
-
-    status = "running" if still_running else "completed"
-    return f"Worker '{worker_id}' ({worker_type}) status: {status}\n\nOutput so far:\n{parsed}"
+    parsed = _parse_worker_output(raw, worker_info.get("provider", "claude"))
+    worker_type = worker_info.get("worker_type", "unknown")
+    provider = worker_info.get("provider", "unknown")
+    status = "running" if _is_process_running(worker_info.get("pid")) else "completed"
+    return f"Worker '{worker_id}' ({worker_type}, {provider}) status: {status}\n\nOutput so far:\n{parsed}"
 
 
 def stop_worker(worker_id, carbon_id):
-    """Stop a running worker or remove from queue. Only if it belongs to this carbon."""
-    # Check if it's in the browser queue first
     queue = _load_browser_queue()
     found_in_queue = False
     for q in queue:
@@ -559,24 +821,22 @@ def stop_worker(worker_id, carbon_id):
     active = _load_active()
     if worker_id not in active:
         return f"Error: Worker '{worker_id}' is not active."
-
     if active[worker_id].get("carbon_id") != carbon_id:
         return f"Error: Worker '{worker_id}' does not belong to you."
 
     worker_info = active[worker_id]
-    pid = worker_info["pid"]
-    worker_type = worker_info.get("worker_type", "unknown")
+    if worker_info.get("provider") == "chatgpt":
+        _sync_codex_session_id(worker_id, worker_info)
+        worker_info = _load_active().get(worker_id, worker_info)
 
     try:
         if IS_WINDOWS:
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
-                           capture_output=True, timeout=10)
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(worker_info["pid"])], capture_output=True, timeout=10)
         else:
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
+            os.killpg(os.getpgid(worker_info["pid"]), signal.SIGTERM)
     except (OSError, ProcessLookupError):
         pass
 
-    # Clean up silicon-browser session for incognito workers
     _cleanup_silicon_browser_session(worker_id, worker_info)
 
     del active[worker_id]
@@ -600,11 +860,9 @@ def stop_worker(worker_id, carbon_id):
 
 
 def list_active(carbon_id):
-    """List active and queued workers for a specific carbon."""
     active = _load_active()
     queue = _load_browser_queue()
 
-    # Filter by carbon_id
     my_active = {wid: info for wid, info in active.items() if info.get("carbon_id") == carbon_id}
     my_queue = [q for q in queue if q.get("carbon_id") == carbon_id]
 
@@ -617,7 +875,8 @@ def list_active(carbon_id):
             elapsed = time.time() - info["started"]
             minutes = int(elapsed // 60)
             wtype = info.get("worker_type", "unknown")
-            lines.append(f"- {wid} ({wtype}, pid: {info['pid']}, running for {minutes}m, task: {info['task'][:80]})")
+            provider = info.get("provider", "unknown")
+            lines.append(f"- {wid} ({wtype}, {provider}, pid: {info['pid']}, running for {minutes}m, task: {info['task'][:80]})")
 
     if my_queue:
         lines.append("")
@@ -630,27 +889,25 @@ def list_active(carbon_id):
 
 
 def list_archive(carbon_id):
-    """List archived worker outputs for a specific carbon."""
     if not os.path.exists(OUTPUTS_DIR):
         return "No archives."
 
     meta = _load_archive_meta()
     archives = []
-
     for archive_id, info in meta.items():
         if info.get("carbon_id") == carbon_id:
             fpath = os.path.join(OUTPUTS_DIR, f"{archive_id}.txt")
             if os.path.exists(fpath):
-                archives.append(archive_id)
+                provider = info.get("provider", "unknown")
+                archives.append(f"- {archive_id} ({provider})")
 
     if not archives:
         return "No archives."
 
-    return "Your archived workers:\n" + "\n".join(f"- {a}" for a in sorted(archives))
+    return "Your archived workers:\n" + "\n".join(sorted(archives))
 
 
 def read_archive(archive_id, carbon_id):
-    """Read the complete output of an archived worker. Only if it belongs to this carbon."""
     meta = _load_archive_meta()
     archive_info = meta.get(archive_id)
 
@@ -664,38 +921,28 @@ def read_archive(archive_id, carbon_id):
     with open(archive_path) as f:
         raw = f.read()
 
-    return _parse_worker_output(raw)
+    provider = archive_info.get("provider", "claude") if archive_info else "claude"
+    return _parse_worker_output(raw, provider)
 
 
 # --- Event loop handlers ---
 
-def _has_result_event(output_path):
-    """Check if the worker output file contains a result event (meaning it's done)."""
+def _has_completion_event(output_path, provider):
     if not output_path or not os.path.exists(output_path):
         return False
-    try:
-        with open(output_path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                    if event.get("type") == "result":
-                        return True
-                except (json.JSONDecodeError, ValueError):
-                    pass
-    except Exception:
-        pass
-    return False
+
+    raw = _read_text_file(output_path)
+    events = _extract_json_events(raw)
+    if provider == "chatgpt":
+        return any(event.get("type") == "turn.completed" for event in events)
+    return any(event.get("type") == "result" for event in events)
 
 
 _sweep_call_counter = 0
-_SWEEP_INTERVAL = 10  # run orphan sweep every N check_completed_workers calls
+_SWEEP_INTERVAL = 10
 
 
 def check_completed_workers():
-    """Check for workers that finished. Returns {carbon_id: [completed_info, ...]}."""
     global _sweep_call_counter
     _sweep_call_counter += 1
     if _sweep_call_counter >= _SWEEP_INTERVAL:
@@ -704,44 +951,45 @@ def check_completed_workers():
 
     active = _load_active()
     completed_by_carbon = {}
-    for worker_id in list(active.keys()):
-        output_path = active[worker_id].get("output_path")
 
-        if not _has_result_event(output_path):
+    for worker_id in list(active.keys()):
+        worker_info = active[worker_id]
+        provider = worker_info.get("provider", "claude")
+        output_path = worker_info.get("output_path")
+
+        if provider == "chatgpt":
+            _sync_codex_session_id(worker_id, worker_info)
+            active = _load_active()
+            worker_info = active.get(worker_id, worker_info)
+            output_path = worker_info.get("output_path")
+
+        process_running = _is_process_running(worker_info.get("pid"))
+        if process_running and not _has_completion_event(output_path, provider):
             continue
 
-        worker_type = active[worker_id].get("worker_type", "unknown")
-        carbon_id = active[worker_id].get("carbon_id", "unknown")
+        worker_type = worker_info.get("worker_type", "unknown")
+        carbon_id = worker_info.get("carbon_id", "unknown")
 
-        # Clean up silicon-browser session for incognito workers
-        _cleanup_silicon_browser_session(worker_id, active[worker_id])
+        _cleanup_silicon_browser_session(worker_id, worker_info)
 
-        # Worker is done - read and archive
-        result_text = ""
-        archive_id = ""
-        if output_path and os.path.exists(output_path):
-            with open(output_path) as f:
-                raw = f.read()
-            result_text = _parse_worker_output(raw)
-            archive_id = _archive_active_output(worker_id, active[worker_id], carbon_id)
-            if archive_id:
-                _update_worker_record(worker_id, last_archive_id=archive_id, last_used_at=time.time())
+        raw = _read_text_file(output_path)
+        result_text = _parse_worker_output(raw, provider)
+        archive_id = _archive_active_output(worker_id, worker_info, carbon_id)
+        if archive_id:
+            _update_worker_record(worker_id, last_archive_id=archive_id, last_used_at=time.time())
 
         del active[worker_id]
 
-        # Remove any checkback for this worker since it's done
         try:
             from core.cron.checkback import remove_checkback
             remove_checkback(worker_id)
         except Exception:
             pass
 
-        if carbon_id not in completed_by_carbon:
-            completed_by_carbon[carbon_id] = []
-
-        completed_by_carbon[carbon_id].append({
+        completed_by_carbon.setdefault(carbon_id, []).append({
             "worker_id": worker_id,
             "worker_type": worker_type,
+            "provider": provider,
             "carbon_id": carbon_id,
             "archive_id": archive_id,
             "result": result_text,
@@ -750,14 +998,12 @@ def check_completed_workers():
     if completed_by_carbon:
         _save_active(active)
 
-    # Always try to start the next queued browser worker
     queue_result, queue_carbon_id = _process_browser_queue()
     if queue_result and queue_carbon_id:
-        if queue_carbon_id not in completed_by_carbon:
-            completed_by_carbon[queue_carbon_id] = []
-        completed_by_carbon[queue_carbon_id].append({
+        completed_by_carbon.setdefault(queue_carbon_id, []).append({
             "worker_id": "[queue]",
             "worker_type": "browser",
+            "provider": "claude",
             "carbon_id": queue_carbon_id,
             "archive_id": "",
             "result": queue_result,
@@ -767,7 +1013,6 @@ def check_completed_workers():
 
 
 def check_completed_workers_formatted():
-    """Event loop handler: returns {carbon_id: context_string}."""
     completed_by_carbon = check_completed_workers()
     if not completed_by_carbon:
         return {}
@@ -780,7 +1025,7 @@ def check_completed_workers_formatted():
                 parts.append(c["result"])
             else:
                 parts.append(
-                    f"Worker '{c['worker_id']}' ({c['worker_type']}) completed:\n"
+                    f"Worker '{c['worker_id']}' ({c['worker_type']}, {c['provider']}) completed:\n"
                     f"Result: {c['result']}\n"
                     f"Complete worker output archived with id: {c['archive_id']}"
                 )
@@ -789,7 +1034,6 @@ def check_completed_workers_formatted():
 
 
 def clean_old_archives(archive_for_seconds):
-    """Remove archived worker outputs older than archive_for_seconds."""
     if not os.path.exists(OUTPUTS_DIR):
         return {}
 
@@ -818,42 +1062,27 @@ def clean_old_archives(archive_for_seconds):
 
 # --- Output parsing ---
 
-def _parse_worker_output(raw):
-    """Parse stream-json output from a claude worker process.
-    Extracts the final result or the latest assistant text."""
+def _parse_claude_output(raw):
     if not raw.strip():
         return "No output yet."
 
-    lines = raw.strip().split("\n")
-    events = []
-
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            events.append(json.loads(line))
-        except (json.JSONDecodeError, ValueError):
-            pass
-
+    events = _extract_json_events(raw)
     if not events:
         return "No parseable output yet."
 
-    # Check for a result event (means worker finished)
     result_event = None
-    for e in events:
-        if e.get("type") == "result":
-            result_event = e
+    for event in events:
+        if event.get("type") == "result":
+            result_event = event
 
     if result_event and result_event.get("result"):
         return result_event["result"]
 
-    # Otherwise collect assistant text blocks
     texts = []
     seen = set()
-    for e in events:
-        if e.get("type") == "assistant" and e.get("message", {}).get("content"):
-            for block in e["message"]["content"]:
+    for event in events:
+        if event.get("type") == "assistant" and event.get("message", {}).get("content"):
+            for block in event["message"]["content"]:
                 if block.get("type") == "text":
                     txt = block.get("text", "").strip()
                     if txt and txt not in seen:
@@ -862,5 +1091,36 @@ def _parse_worker_output(raw):
 
     if texts:
         return texts[-1]
+    return "Worker running, no text output yet."
+
+
+def _parse_codex_output(raw):
+    if not raw.strip():
+        return "No output yet."
+
+    events = _extract_json_events(raw)
+    if not events:
+        return "No parseable output yet."
+
+    texts = []
+    for event in events:
+        if event.get("type") == "item.completed":
+            item = event.get("item", {})
+            if item.get("type") == "agent_message":
+                text = item.get("text", "").strip()
+                if text:
+                    texts.append(text)
+
+    if texts:
+        return texts[-1]
+
+    if any(event.get("type") == "turn.completed" for event in events):
+        return "Worker completed with no text output."
 
     return "Worker running, no text output yet."
+
+
+def _parse_worker_output(raw, provider="claude"):
+    if provider == "chatgpt":
+        return _parse_codex_output(raw)
+    return _parse_claude_output(raw)

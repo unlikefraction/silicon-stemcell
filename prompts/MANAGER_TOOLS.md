@@ -11,7 +11,7 @@ Output should be a valid JSON and it should be a output that can then be interpr
 {
     "tool": "worker/worker_type", # available: worker/browser; worker/terminal; worker/writer;
     "type": "new",
-    "worker-id": "readable-and-descriptive-worker-identifier", # stable logical worker handle. the system creates and persists a hidden claude session UUID behind this id.
+    "worker-id": "readable-and-descriptive-worker-identifier", # stable logical worker handle. the system persists the backend provider and session id behind this id.
     "task": "A very detailed description of the task",
     "incognito": false, # (optional, browser worker only) default false. true = fresh browser, no login state, runs in parallel. false = uses shared "silicon" profile with saved login state, queued.
     "checkback_in": 5 # in minutes. system will auto-check on the worker after this many minutes and send you its status. this is the estimated time of completion of the running worker, ideally the worker should have finished and returned back to you, but if doesn't, its a reminder to check on it if needed.
@@ -45,6 +45,10 @@ About Worker Types:
    IMPORTANT: If a browser worker needs to log into a service that isn't already saved in the silicon profile, the carbon must do it themselves. Tell the carbon to run `python main.py browser` on their machine -- this opens a headed browser with the silicon profile where they can log in manually. The login state is then saved for all future browser workers.
 
 2. worker/terminal: Can do anything on Terminal. Specialized for writing code and doing things on the OS. Can build full fleged apps in any language mentioned in the task. Use this for writing custom tools to be used. Multiple terminal workers can work in parallel. Make sure to give all the technical details to this worker.
+
+   New terminal workers read their backend preference from `silicon.json` every time they are started. The value is an ordered list at `workers.terminal`, for example `["chatgpt", "claude"]`. Silicon tries providers in that exact order for NEW terminal workers only.
+
+   Once a terminal worker has started successfully, its actual provider and session id are persisted. Future `worker/message` calls resume with that same provider regardless of what `silicon.json` says later.
 
 3. worker/writer: Its an excellent writter. It has been given special skills on how to write. It can write and edit its own writting before giving you back the best version of written things.
 

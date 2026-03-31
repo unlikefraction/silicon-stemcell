@@ -4,6 +4,6 @@
     "version": "1.0",
     "run": "python main.py",
     "workers": {
-        "terminal": "claude" // "chatgpt"
+        "terminal": ["chatgpt", "claude"]
     }
 }
