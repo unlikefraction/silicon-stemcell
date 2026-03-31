@@ -1,0 +1,6 @@
+{
+    "name": "Silicon",
+    "address": "",
+    "version": "1.0",
+    "run": "python main.py"
+}
