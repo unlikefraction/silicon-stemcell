@@ -111,6 +111,19 @@ File types auto-detected:
 
 Unrecognized `[brackets]` are left as plain text — nothing breaks.
 
+## Glass Integration
+
+When a stemcell folder has been claimed from Glass, it contains a local `.glass.json`.
+
+The helper module `core/glass.py` can then:
+
+- Push the current folder snapshot back to Glass with `push_current_folder_now()`
+- List silicon threads with `list_silicon_threads()`
+- Read direct messages with `get_thread_messages(target_username)`
+- Send direct silicon messages with `send_silicon_message(...)`
+
+This keeps Telegram as the carbon-facing surface while Glass handles silicon storage, respawn, and silicon-to-silicon transport.
+
 ## Architecture
 
 ### Multi-Carbon (Multi-User)

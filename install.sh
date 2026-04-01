@@ -142,6 +142,33 @@ fi
 
 header "Step 2 · Prerequisites"
 
+install_glass_cli() {
+    local glass_installer="https://raw.githubusercontent.com/unlikefraction/glass/main/install.sh"
+    if command -v glass &>/dev/null; then
+        success "glass CLI: installed"
+        return 0
+    fi
+
+    warn "glass CLI not found"
+    if command -v curl &>/dev/null; then
+        info "Installing glass CLI..."
+        if curl -fsSL "$glass_installer" | bash; then
+            success "glass CLI installed"
+            return 0
+        fi
+    elif command -v wget &>/dev/null; then
+        info "Installing glass CLI..."
+        if wget -qO- "$glass_installer" | bash; then
+            success "glass CLI installed"
+            return 0
+        fi
+    fi
+
+    warn "Could not auto-install glass CLI. You can install it later with:"
+    warn "curl -fsSL $glass_installer | bash"
+    return 1
+}
+
 # ── Python 3.9+ ───────────────────────────────────────────────
 
 install_python() {
@@ -215,6 +242,8 @@ else
         exit 1
     fi
 fi
+
+install_glass_cli || true
 
 # ── Node.js / npm ─────────────────────────────────────────────
 
@@ -528,6 +557,7 @@ cat > "$CLI_SCRIPT" << 'CLIEOF'
 
 REGISTRY_DIR="$HOME/.silicon"
 REGISTRY_FILE="$REGISTRY_DIR/registry.json"
+GLASS_SERVER_URL="${GLASS_SERVER_URL:-https://glass.unlikefraction.com}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'
@@ -592,6 +622,64 @@ get_pid() {
     if [ -f "$pid_file" ]; then
         cat "$pid_file" 2>/dev/null
     fi
+}
+
+ensure_glass_cli() {
+    if command -v glass &>/dev/null; then
+        return 0
+    fi
+
+    info "glass CLI not found. Installing it..."
+    local glass_installer="https://raw.githubusercontent.com/unlikefraction/glass/main/install.sh"
+    if command -v curl &>/dev/null; then
+        curl -fsSL "$glass_installer" | bash
+    elif command -v wget &>/dev/null; then
+        wget -qO- "$glass_installer" | bash
+    else
+        error "Need curl or wget to install glass CLI"
+        exit 1
+    fi
+
+    command -v glass >/dev/null 2>&1 || {
+        error "glass CLI installation failed"
+        exit 1
+    }
+}
+
+register_installation() {
+    local instance_name="$1"
+    local target_dir="$2"
+    local pid_file="$target_dir/.silicon.pid"
+
+    "$PYTHON_CMD" - <<PY
+import json, os
+reg_file = os.path.expanduser("$REGISTRY_FILE")
+instance_name = "$instance_name"
+target_dir = "$target_dir"
+pid_file = "$pid_file"
+
+if os.path.exists(reg_file):
+    with open(reg_file) as f:
+        reg = json.load(f)
+else:
+    reg = {"installations": []}
+
+for inst in reg.get("installations", []):
+    if inst.get("path") == target_dir or inst.get("name") == instance_name:
+        print("exists")
+        raise SystemExit(0)
+
+reg.setdefault("installations", []).append({
+    "name": instance_name,
+    "path": target_dir,
+    "pid_file": pid_file,
+})
+
+with open(reg_file, "w") as f:
+    json.dump(reg, f, indent=2)
+
+print("added")
+PY
 }
 
 # Find installation by current directory or name
@@ -823,6 +911,164 @@ cmd_browser() {
     "$PYTHON_CMD" main.py browser
 }
 
+cmd_pull() {
+    local username="$1"
+    if [ -z "$username" ]; then
+        error "Usage: silicon pull <silicon-username>"
+        exit 1
+    fi
+
+    ensure_glass_cli
+
+    local target_dir
+    target_dir="$(pwd)/$username"
+    if [ -e "$target_dir" ]; then
+        error "Target folder already exists: $target_dir"
+        exit 1
+    fi
+
+    if ! command -v curl >/dev/null 2>&1; then
+        error "curl is required for silicon pull"
+        exit 1
+    fi
+
+    printf "${BOLD}? Connector code:${RESET} "
+    local connector_code
+    read -r -s connector_code </dev/tty
+    printf "\n"
+
+    mkdir -p "$target_dir"
+
+    local folder_fingerprint
+    folder_fingerprint=$("$PYTHON_CMD" - <<PY
+import hashlib, pathlib, socket
+target = pathlib.Path("$target_dir").resolve()
+print(hashlib.sha256(f"{socket.gethostname()}::{target}".encode()).hexdigest())
+PY
+)
+
+    local claim_file
+    claim_file="$(mktemp /tmp/silicon-pull-claim-XXXXXX.json)"
+    local payload
+    payload=$("$PYTHON_CMD" - <<PY
+import json
+print(json.dumps({
+    "username": "$username",
+    "connector_code": "$connector_code",
+    "folder_label": "$username",
+    "folder_fingerprint": "$folder_fingerprint",
+}))
+PY
+)
+
+    local http_code
+    http_code=$(curl -sS -o "$claim_file" -w "%{http_code}" \
+        -H "Content-Type: application/json" \
+        -d "$payload" \
+        "$GLASS_SERVER_URL/sync/api/pull/claim/")
+
+    if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+        local err
+        err=$("$PYTHON_CMD" - <<PY
+import json
+try:
+    data = json.load(open("$claim_file"))
+    print(data.get("error", "Pull claim failed."))
+except Exception:
+    print("Pull claim failed.")
+PY
+)
+        rm -rf "$target_dir" "$claim_file"
+        error "$err"
+        exit 1
+    fi
+
+    local archive_file
+    archive_file="$(mktemp /tmp/silicon-pull-archive-XXXXXX.tar.gz)"
+
+    local has_snapshot
+    has_snapshot=$("$PYTHON_CMD" - <<PY
+import json
+claim = json.load(open("$claim_file"))
+print("yes" if claim.get("has_snapshot") else "no")
+PY
+)
+
+    if [ "$has_snapshot" = "yes" ]; then
+        curl -sS \
+            -H "X-Source-Token: $("$PYTHON_CMD" - <<PY
+import json
+claim = json.load(open("$claim_file"))
+print(claim["source_token"])
+PY
+)" \
+            "$GLASS_SERVER_URL/sync/api/silicons/$username/latest.tar.gz" \
+            -o "$archive_file"
+        tar -xzf "$archive_file" -C "$target_dir"
+    fi
+
+    "$PYTHON_CMD" - <<PY
+import json, pathlib
+
+target = pathlib.Path("$target_dir")
+claim = json.load(open("$claim_file"))
+cfg = {
+    "server_url": "$GLASS_SERVER_URL",
+    "silicon_username": "$username",
+    "source_token": claim["source_token"],
+    "api_key": claim["api_key"],
+    "folder_fingerprint": "$folder_fingerprint",
+    "last_tree_hash": claim.get("latest_tree_hash", ""),
+}
+
+(target / ".glass.json").write_text(json.dumps(cfg, indent=2) + "\\n")
+
+silicon_path = target / "silicon.json"
+if silicon_path.exists():
+    try:
+        silicon = json.loads(silicon_path.read_text())
+    except json.JSONDecodeError:
+        silicon = {}
+else:
+    silicon = {}
+
+silicon.setdefault("name", "Silicon")
+silicon.setdefault("version", "1.0")
+silicon.setdefault("run", "python main.py")
+silicon.setdefault("workers", {"terminal": ["chatgpt", "claude"]})
+silicon["address"] = "$username"
+silicon["glass"] = {
+    "server_url": "$GLASS_SERVER_URL",
+    "silicon_username": "$username",
+    "api_key": claim["api_key"],
+    "source_token": claim["source_token"],
+}
+silicon_path.write_text(json.dumps(silicon, indent=4) + "\\n")
+
+env_path = target / "env.py"
+lines = []
+if env_path.exists():
+    lines = env_path.read_text().splitlines()
+out = []
+seen = False
+for line in lines:
+    if line.startswith("GLASS_API_KEY ="):
+        out.append(f'GLASS_API_KEY = "{claim["api_key"]}"')
+        seen = True
+    else:
+        out.append(line)
+if not seen:
+    out.append(f'GLASS_API_KEY = "{claim["api_key"]}"')
+env_path.write_text("\\n".join(out).rstrip() + "\\n")
+PY
+
+    register_installation "$username" "$target_dir" >/dev/null
+
+    rm -f "$claim_file" "$archive_file"
+    success "Pulled '$username' into $target_dir"
+    info "Registered as a silicon instance."
+}
+
 cmd_update() {
     # Update the silicon CLI script (not the instances themselves)
     info "Updating silicon CLI..."
@@ -1026,6 +1272,7 @@ cmd_help() {
     printf "  silicon browser [name]      Open headed browser for login\n"
     printf "  silicon debug [name]        Attach to running instance (live logs)\n"
     printf "  silicon attach [path]       Register an existing silicon instance\n"
+    printf "  silicon pull <username>     Pull a silicon from Glass into a new folder\n"
     printf "  silicon list                List all instances\n"
     printf "  silicon script update       Update the silicon CLI script\n"
     printf "  silicon install             Install a new instance\n"
@@ -1037,7 +1284,7 @@ cmd_help() {
 
 suggest_command() {
     local input="$1"
-    local commands="start stop status browser debug attach list install new help script"
+    local commands="start stop status browser debug attach pull list install new help script"
     local best_match=""
     local best_score=999
 
@@ -1093,6 +1340,7 @@ case "$CMD" in
     browser) cmd_browser "$ARG" ;;
     debug)   cmd_debug "$ARG" ;;
     attach)  cmd_attach "$ARG" ;;
+    pull)    cmd_pull "$ARG" ;;
     list|ls) cmd_list ;;
     script)
         case "$ARG" in

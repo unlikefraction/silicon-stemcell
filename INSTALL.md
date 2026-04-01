@@ -64,6 +64,7 @@ silicon                  # Show status or list instances
 silicon start            # Start silicon
 silicon stop             # Stop silicon
 silicon browser          # Open browser for manual login
+silicon pull myagent     # Pull a silicon from Glass into ./myagent
 silicon list             # List all installed instances
 silicon status           # Show status
 silicon install          # Install another instance
