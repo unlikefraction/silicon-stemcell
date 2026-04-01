@@ -588,6 +588,8 @@ cat > "$CLI_SCRIPT" << 'CLIEOF'
 REGISTRY_DIR="$HOME/.silicon"
 REGISTRY_FILE="$REGISTRY_DIR/registry.json"
 GLASS_SERVER_URL="${GLASS_SERVER_URL:-https://glass.unlikefraction.com}"
+REPO_URL="https://github.com/unlikefraction/silicon-stemcell.git"
+REPO_ZIP="https://github.com/unlikefraction/silicon-stemcell/archive/refs/heads/main.zip"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'
@@ -702,6 +704,161 @@ with open(reg_file, "w") as f:
 
 print("added")
 PY
+}
+
+download_stemcell_source() {
+    local target_dir="$1"
+    rm -rf "$target_dir"
+    mkdir -p "$target_dir"
+
+    if command -v git &>/dev/null; then
+        git clone --depth 1 "$REPO_URL" "$target_dir" >/dev/null 2>&1
+        rm -rf "$target_dir/.git"
+        return 0
+    fi
+
+    if command -v curl &>/dev/null; then
+        local tmp_zip
+        tmp_zip=$(mktemp /tmp/silicon-XXXXXX.zip)
+        curl -fsSL "$REPO_ZIP" -o "$tmp_zip"
+        unzip -q "$tmp_zip" -d "$target_dir"
+        rm -f "$tmp_zip"
+    elif command -v wget &>/dev/null; then
+        local tmp_zip
+        tmp_zip=$(mktemp /tmp/silicon-XXXXXX.zip)
+        wget -q "$REPO_ZIP" -O "$tmp_zip"
+        unzip -q "$tmp_zip" -d "$target_dir"
+        rm -f "$tmp_zip"
+    else
+        error "Need git, curl, or wget to download Silicon."
+        exit 1
+    fi
+
+    local extracted
+    extracted=$(find "$target_dir" -mindepth 1 -maxdepth 1 -type d -name 'silicon-*' | head -1)
+    if [ -n "$extracted" ]; then
+        local final_dir="${target_dir}.tmp-root"
+        mv "$extracted" "$final_dir"
+        rm -rf "$target_dir"
+        mv "$final_dir" "$target_dir"
+    fi
+}
+
+hydrate_silicon_dir() {
+    local target_dir="$1"
+    local abs_target
+    abs_target=$(cd "$target_dir" 2>/dev/null && pwd || echo "$target_dir")
+    local tmp_src
+    tmp_src=$(mktemp -d /tmp/silicon-src-XXXXXX)
+    trap 'rm -rf "$tmp_src"' RETURN
+
+    if [ ! -d "$abs_target" ]; then
+        error "Directory not found: $abs_target"
+        exit 1
+    fi
+
+    info "Downloading Silicon stemcell..."
+    download_stemcell_source "$tmp_src"
+
+    local instance_name
+    instance_name=$("$PYTHON_CMD" - <<PY
+import json, pathlib
+target = pathlib.Path("$abs_target")
+silicon_path = target / "silicon.json"
+name = ""
+if silicon_path.exists():
+    try:
+        data = json.loads(silicon_path.read_text())
+        name = (data.get("address") or data.get("name") or "").strip()
+    except Exception:
+        pass
+if not name:
+    name = target.name
+print(name)
+PY
+)
+
+    info "Hydrating $abs_target..."
+    "$PYTHON_CMD" - <<PY
+import json
+import pathlib
+import shutil
+
+src = pathlib.Path("$tmp_src")
+dst = pathlib.Path("$abs_target")
+
+skip_names = {".git", "__pycache__", ".DS_Store"}
+preserve_root_files = {"env.py", "silicon.json", ".glass.json"}
+
+for path in src.rglob("*"):
+    rel = path.relative_to(src)
+    if any(part in skip_names for part in rel.parts):
+        continue
+    target = dst / rel
+    if path.is_dir():
+        target.mkdir(parents=True, exist_ok=True)
+        continue
+    if rel.parts and rel.parts[0] in preserve_root_files and len(rel.parts) == 1 and target.exists():
+        continue
+    if target.exists():
+        continue
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(path, target)
+
+silicon_path = dst / "silicon.json"
+if silicon_path.exists():
+    try:
+        silicon = json.loads(silicon_path.read_text())
+    except json.JSONDecodeError:
+        silicon = {}
+else:
+    silicon = {}
+
+silicon.setdefault("name", "Silicon")
+silicon.setdefault("version", "1.0")
+silicon.setdefault("run", "python main.py")
+silicon.setdefault("workers", {"terminal": ["chatgpt", "claude"]})
+silicon.setdefault("address", "$instance_name")
+silicon_path.write_text(json.dumps(silicon, indent=4) + "\\n")
+
+env_path = dst / "env.py"
+lines = env_path.read_text().splitlines() if env_path.exists() else []
+required = {
+    "TELEGRAM_BOT_TOKEN": "",
+    "OPENAI_API_KEY": "",
+    "BROWSER_PROFILE": "$instance_name",
+}
+seen = set()
+out = []
+for line in lines:
+    matched = False
+    for key in required:
+        if line.startswith(f"{key} ="):
+            out.append(line)
+            seen.add(key)
+            matched = True
+            break
+    if not matched:
+        out.append(line)
+for key, value in required.items():
+    if key not in seen:
+        out.append(f'{key} = "{value}"')
+env_path.write_text("\\n".join(out).rstrip() + "\\n")
+PY
+
+    if [ -f "$abs_target/requirements.txt" ]; then
+        info "Installing Python dependencies..."
+        "$PYTHON_CMD" -m pip install -r "$abs_target/requirements.txt" --quiet 2>/dev/null || \
+            "$PYTHON_CMD" -m pip install -r "$abs_target/requirements.txt" --quiet --user
+    fi
+
+    mkdir -p "$REGISTRY_DIR"
+    if [ ! -f "$REGISTRY_FILE" ]; then
+        echo '{"installations": []}' > "$REGISTRY_FILE"
+    fi
+    register_installation "$instance_name" "$abs_target" >/dev/null
+    success "Hydrated '$instance_name' at $abs_target"
+    info "Run 'silicon start $instance_name' when you're ready."
 }
 
 # Find installation by current directory or name
@@ -1280,7 +1437,12 @@ cmd_install() {
 }
 
 cmd_new() {
-    cmd_install
+    local target="${1:-}"
+    if [ -n "$target" ]; then
+        hydrate_silicon_dir "$target"
+    else
+        cmd_install
+    fi
 }
 
 cmd_help() {
@@ -1288,6 +1450,7 @@ cmd_help() {
     printf "${BOLD}Usage:${RESET}\n"
     printf "  silicon                     Show status or list instances\n"
     printf "  silicon new                 Create a new Silicon (same as install)\n"
+    printf "  silicon new .               Hydrate current folder into a runnable silicon\n"
     printf "  silicon start [name]        Start a silicon instance\n"
     printf "  silicon stop [name]         Stop a running instance\n"
     printf "  silicon status [name]       Show instance status\n"
@@ -1370,7 +1533,7 @@ case "$CMD" in
             *) error "Unknown script command: $ARG. Did you mean: silicon script update?"; exit 1 ;;
         esac
         ;;
-    new)     cmd_new ;;
+    new)     cmd_new "$ARG" ;;
     install) cmd_install ;;
     help|-h|--help) cmd_help ;;
     "")      cmd_status "" ;;
