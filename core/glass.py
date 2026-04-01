@@ -215,6 +215,24 @@ def list_silicon_threads(start=None):
     return response.json()
 
 
+def silicon_exists(target_username, start=None):
+    try:
+        get_thread_messages(target_username, after=0, start=start)
+        return True
+    except requests.HTTPError as exc:
+        response = getattr(exc, "response", None)
+        if response is not None and response.status_code == 404:
+            return False
+        raise
+
+
+def ensure_known_silicon_contact(target_username):
+    if not silicon_exists(target_username):
+        return None, False
+    _, carbon_id, contact, _ = _ensure_silicon_contact(target_username)
+    return contact, True
+
+
 def get_thread_messages(target_username, after=None, start=None):
     config, _ = load_glass_config(start)
     if "api_key" not in config:

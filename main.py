@@ -14,7 +14,7 @@ if PROJECT_ROOT not in sys.path:
 from config import EVENT_LOOP, LOOP_TICK
 from manager import claude_code, parse_manager_output, new_session
 from core.telegram import reply_user, get_contacts
-from core.glass import send_silicon_message
+from core.glass import ensure_known_silicon_contact
 from core.messages import send_manager_message
 from core.carbon_id import change_carbon_id
 from worker.handler import (
@@ -179,35 +179,32 @@ def execute_single_tool(tool_spec, carbon_id):
 
     elif tool_name == "message_manager":
         target_carbon_id = tool_spec.get("carbon_id", "")
+        target_silicon_id = tool_spec.get("silicon_id", "")
         message = tool_spec.get("message", "")
-        if not target_carbon_id:
-            return "Tool 'message_manager': Error: carbon_id is required"
         if not message:
             return "Tool 'message_manager': Error: message is required"
-        status = send_manager_message(carbon_id, target_carbon_id, message)
-        return f"Tool 'message_manager' (to {target_carbon_id}): {status}"
 
-    elif tool_name == "message_silicon":
-        silicon_id = tool_spec.get("silicon_id", "")
-        message = tool_spec.get("message", "")
-        kind = tool_spec.get("kind", "text")
-        attachment_path = tool_spec.get("attachment_path")
-        if not silicon_id:
-            return "Tool 'message_silicon': Error: silicon_id is required"
-        if kind == "text" and not message:
-            return "Tool 'message_silicon': Error: message is required for text messages"
-        if kind != "text" and not attachment_path:
-            return "Tool 'message_silicon': Error: attachment_path is required for non-text messages"
+        contacts = get_contacts().get("contacts", {})
+
+        if target_carbon_id:
+            target_contact = contacts.get(target_carbon_id)
+            if target_contact and target_contact.get("contact_type") != "silicon":
+                status = send_manager_message(carbon_id, target_carbon_id, message)
+                return f"Tool 'message_manager' (to {target_carbon_id}): {status}"
+            if target_contact and target_contact.get("contact_type") == "silicon":
+                target_silicon_id = target_contact.get("silicon_id", target_carbon_id)
+
+        if not target_silicon_id:
+            return "Tool 'message_manager': Error: carbon_id or silicon_id is required"
+
         try:
-            send_silicon_message(
-                silicon_id,
-                body=message,
-                kind=kind,
-                attachment_path=attachment_path,
-            )
-            return f"Tool 'message_silicon' (to {silicon_id}): Message sent"
+            contact, exists = ensure_known_silicon_contact(target_silicon_id)
+            if not exists:
+                return f"Tool 'message_manager' (to {target_silicon_id}): Error: silicon_id does not exist on Glass"
+            status = send_manager_message(carbon_id, target_silicon_id, message)
+            return f"Tool 'message_manager' (to {target_silicon_id}): {status}"
         except Exception as e:
-            return f"Tool 'message_silicon' (to {silicon_id}): Error: {e}"
+            return f"Tool 'message_manager' (to {target_silicon_id}): Error: {e}"
 
     elif tool_name.startswith("worker"):
         worker_type, action_type, worker_id = _parse_worker_tool(tool_spec)
