@@ -846,6 +846,66 @@ for key, value in required.items():
 env_path.write_text("\\n".join(out).rstrip() + "\\n")
 PY
 
+    local current_telegram=""
+    local current_openai=""
+    if [ -f "$abs_target/env.py" ]; then
+        current_telegram=$("$PYTHON_CMD" - <<PY
+import pathlib, re
+text = pathlib.Path("$abs_target/env.py").read_text()
+m = re.search(r'^TELEGRAM_BOT_TOKEN\\s*=\\s*["\\'](.*)["\\']\\s*$', text, re.M)
+print(m.group(1) if m else "")
+PY
+)
+        current_openai=$("$PYTHON_CMD" - <<PY
+import pathlib, re
+text = pathlib.Path("$abs_target/env.py").read_text()
+m = re.search(r'^OPENAI_API_KEY\\s*=\\s*["\\'](.*)["\\']\\s*$', text, re.M)
+print(m.group(1) if m else "")
+PY
+)
+    fi
+
+    if [ -t 0 ] && [ -t 1 ]; then
+        if [ -z "$current_telegram" ]; then
+            echo ""
+            info "You need a Telegram bot token to use Silicon."
+            printf "${DIM}  1. Open Telegram and search for @BotFather${RESET}\n"
+            printf "${DIM}  2. Send /newbot and follow the prompts${RESET}\n"
+            printf "${DIM}  3. Copy the token BotFather gives you${RESET}\n"
+            echo ""
+            current_telegram=$(read_secret "Telegram bot token")
+            if [ -z "$current_telegram" ]; then
+                error "Telegram bot token is required."
+                exit 1
+            fi
+        fi
+
+        if [ -z "$current_openai" ]; then
+            echo ""
+            info "OpenAI API key (for voice transcription & TTS)."
+            info "Press Enter to skip – voice features will be disabled."
+            current_openai=$(read_secret "OpenAI API key (optional)")
+        fi
+
+        "$PYTHON_CMD" - <<PY
+import pathlib, re
+env_path = pathlib.Path("$abs_target/env.py")
+text = env_path.read_text()
+
+def upsert(text, key, value):
+    pattern = rf'^{key}\\s*=\\s*["\\\'].*["\\\']\\s*$'
+    replacement = f'{key} = "{value}"'
+    if re.search(pattern, text, re.M):
+        return re.sub(pattern, replacement, text, flags=re.M)
+    text = text.rstrip() + "\\n"
+    return text + replacement + "\\n"
+
+text = upsert(text, "TELEGRAM_BOT_TOKEN", """$current_telegram""")
+text = upsert(text, "OPENAI_API_KEY", """$current_openai""")
+env_path.write_text(text.rstrip() + "\\n")
+PY
+    fi
+
     if [ -f "$abs_target/requirements.txt" ]; then
         info "Installing Python dependencies..."
         "$PYTHON_CMD" -m pip install -r "$abs_target/requirements.txt" --quiet 2>/dev/null || \
@@ -1111,10 +1171,8 @@ cmd_pull() {
         exit 1
     fi
 
-    printf "${BOLD}? Connector code:${RESET} "
     local connector_code
-    read -r -s connector_code </dev/tty
-    printf "\n"
+    connector_code=$(read_secret "Connector code")
 
     mkdir -p "$target_dir"
 
