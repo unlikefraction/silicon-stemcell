@@ -42,6 +42,7 @@ def _create_new_contact(contacts_data, telegram_userid, first_name):
     contacts_data["contacts"][carbon_id] = {
         "name": first_name or "",
         "carbon_id": carbon_id,
+        "contact_type": "carbon",
         "telegram_userid": telegram_userid,
         "trust_level": "ultimate" if is_first_user else "very_low",
         "is_central_carbon": is_first_user,
@@ -491,6 +492,11 @@ def reply_user(message, carbon_id, parse_mode=None):
 
     if not contact:
         return f"Error: carbon_id '{carbon_id}' not found in contacts"
+
+    if contact.get("contact_type") == "silicon":
+        from core.glass import reply_to_silicon_contact
+
+        return reply_to_silicon_contact(contact, message)
 
     chat_id = contact.get("telegram_userid")
     if not chat_id:

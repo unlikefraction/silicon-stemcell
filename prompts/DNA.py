@@ -7,8 +7,8 @@ This is where you become you. This is how you behave.
 ### Your Memories are in prompts/MEMORY.md
 Everything you remember, or wanna remember is inside this file. This is your hipocampus. If you dont write it inside it, you will not remember it. Write everything you wanna remember. Remove anything you dont want to remember.
 
-### About you (prompts/SILICON.md) and your carbon (prompts/memory/people/{carbon_id}.md)
-If Soul is how you behave, these are what you know about you and your carbon.
+### About you (prompts/SILICON.md) and your contact
+If Soul is how you behave, these are what you know about you and the contact you are currently managing.
 Name, preferences, style, thinking patterns, etc etc
 
 ### LORE (prompts/LORE.md)
@@ -78,6 +78,17 @@ def _get_contact_info(carbon_id):
     return data.get("contacts", {}).get(carbon_id)
 
 
+def _memory_path(contact_id, contact):
+    memory_root = os.path.join(PROMPTS_DIR, "memory")
+    if contact and contact.get("contact_type") == "silicon":
+        return os.path.join(memory_root, "silicons", f"{contact_id}.md"), f"prompts/memory/silicons/{contact_id}.md"
+    return os.path.join(memory_root, "carbons", f"{contact_id}.md"), f"prompts/memory/carbons/{contact_id}.md"
+
+
+def _legacy_memory_path(contact_id):
+    return os.path.join(PROMPTS_DIR, "memory", "people", f"{contact_id}.md")
+
+
 # def _get_contacts_summary():
 #     """Load all contacts for the CONTACTS.md context."""
 #     contacts_file = os.path.join(PROJECT_ROOT, "core", "telegram", "contacts.json")
@@ -100,7 +111,7 @@ def _get_contact_info(carbon_id):
 
 
 def get_manager_prompt(carbon_id):
-    """Build the system prompt for a specific carbon's manager."""
+    """Build the system prompt for a specific contact manager."""
     contact = _get_contact_info(carbon_id)
     trust_level = contact.get("trust_level", "very_low") if contact else "very_low"
 
@@ -116,11 +127,16 @@ def get_manager_prompt(carbon_id):
         _read_prompt(f"trust/{trust_level}.md"),
     ])
 
-    # Load per-carbon memory file
-    carbon_memory_path = os.path.join(PROMPTS_DIR, "memory", "people", f"{carbon_id}.md")
+    # Load per-contact memory file
+    carbon_memory_path, memory_label = _memory_path(carbon_id, contact)
+    if not os.path.exists(carbon_memory_path):
+        legacy_path = _legacy_memory_path(carbon_id)
+        if os.path.exists(legacy_path):
+            carbon_memory_path = legacy_path
+            memory_label = f"prompts/memory/people/{carbon_id}.md"
     carbon_memory = _read_file_raw(carbon_memory_path)
     if carbon_memory:
-        parts.append(f"## About this Carbon ({carbon_id})\nprompts/memory/people/{carbon_id}.md\n{carbon_memory}")
+        parts.append(f"## About this Contact ({carbon_id})\n{memory_label}\n{carbon_memory}")
 
     parts.extend([
         _read_prompt("MEMORY.md"),
@@ -129,7 +145,8 @@ def get_manager_prompt(carbon_id):
     ])
 
     # Add carbon_id context
-    parts.append(f"\n## Current Session\nYou are talking to carbon_id: {carbon_id}\nTheir trust level: {trust_level}")
+    identity_label = "silicon_id" if contact and contact.get("contact_type") == "silicon" else "carbon_id"
+    parts.append(f"\n## Current Session\nYou are talking to contact {identity_label}: {carbon_id}\nTheir trust level: {trust_level}")
 
     # Load BOOT.md if it exists
     boot_path = os.path.join(PROMPTS_DIR, "BOOT.md")

@@ -1,9 +1,11 @@
-# Contacts & Multi-Carbon System
+# Contacts & Multi-Contact System
 
-Silicon serves multiple carbons. Each carbon has:
-- **carbon_id**: A unique alphanumeric slug (a-z, 0-9, -, _). This is their identifier everywhere.
+Silicon serves multiple contacts. A contact can be a carbon on Telegram or another silicon on Glass. Each contact has:
 - **name**: Their display name
-- **telegram_userid**: Their Telegram user ID (numeric)
+- **contact_type**: `carbon` or `silicon`
+- **carbon_id**: A unique alphanumeric slug for Telegram carbons
+- **telegram_userid**: Their Telegram user ID (numeric, for Telegram contacts)
+- **silicon_id**: Their Glass silicon username (for silicon contacts). This is their identifier everywhere for Glass contacts.
 - **trust_level**: very_low, low, ok, high, very_high, ultimate
 - **is_central_carbon**: Whether this is the primary carbon (usually only one)
 - **relation**: Relationship to central carbon
@@ -13,17 +15,22 @@ Silicon serves multiple carbons. Each carbon has:
 All contacts are stored in `core/telegram/contacts.json`.
 You can read and edit this file directly.
 
-## Carbon ID Rules
-- Must be a valid slug: lowercase alphanumeric, hyphens, underscores only
-- Must be UNIQUE across all contacts. Duplicates trigger automatic rollback to last known good state.
-- New users get their telegram_userid as their initial carbon_id
-- You MUST change a new user's carbon_id to something readable during the first conversation using the `change_carbon_id` tool
+## Identity Rules
+- Carbon contacts use `carbon_id`
+- Silicon contacts use `silicon_id`
+- Both must be UNIQUE across all contacts. Duplicates trigger automatic rollback to last known good state.
+- New Telegram users get their telegram_userid as their initial carbon_id
+- New silicon contacts use their real Glass silicon username as their silicon_id and contact key
+- You SHOULD change a new Telegram carbon's carbon_id to something readable during the first conversation if that improves clarity
 - UNIQUE is critical. The system will detect and auto-rollback duplicates.
 
-## Per-Carbon Information
-Store detailed information about each carbon in: `prompts/memory/people/{carbon_id}.md`
-This file is loaded into the prompt when talking to that carbon.
-Create this file for new users during the first conversation.
+## Per-Contact Information
+Store detailed information about each contact in:
+- `prompts/memory/carbons/{carbon_id}.md` for carbons
+- `prompts/memory/silicons/{silicon_id}.md` for silicons
+
+These files are loaded into the prompt when talking to that contact.
+Create the relevant file early on.
 
 ## Trust Level System
 Trust levels determine what a carbon can do and what information they can access.

@@ -14,6 +14,7 @@ if PROJECT_ROOT not in sys.path:
 from config import EVENT_LOOP, LOOP_TICK
 from manager import claude_code, parse_manager_output, new_session
 from core.telegram import reply_user, get_contacts
+from core.glass import send_silicon_message
 from core.messages import send_manager_message
 from core.carbon_id import change_carbon_id
 from worker.handler import (
@@ -71,7 +72,7 @@ def _ensure_env():
 # --- Contacts integrity ---
 
 def validate_contacts_integrity():
-    """Check that no two contacts share the same carbon_id. Auto-restore from backup if corrupted."""
+    """Check that each contact key matches its declared identity. Auto-restore from backup if corrupted."""
     if not os.path.exists(CONTACTS_FILE):
         return
 
@@ -79,18 +80,15 @@ def validate_contacts_integrity():
         contacts_data = json.load(f)
 
     contacts = contacts_data.get("contacts", {})
-    seen_ids = set()
     duplicates = False
 
     for key, info in contacts.items():
-        cid = info.get("carbon_id", key)
-        if cid != key:
-            log(f"[Silicon] WARNING: Contact key '{key}' doesn't match carbon_id '{cid}'")
+        contact_type = info.get("contact_type", "carbon")
+        expected_id = info.get("silicon_id") if contact_type == "silicon" else info.get("carbon_id", key)
+        label = "silicon_id" if contact_type == "silicon" else "carbon_id"
+        if expected_id != key:
+            log(f"[Silicon] WARNING: Contact key '{key}' doesn't match {label} '{expected_id}'")
             duplicates = True
-        if cid in seen_ids:
-            log(f"[Silicon] CRITICAL: Duplicate carbon_id '{cid}' detected!")
-            duplicates = True
-        seen_ids.add(cid)
 
     if duplicates:
         if os.path.exists(CONTACTS_BACKUP_FILE):
@@ -188,6 +186,28 @@ def execute_single_tool(tool_spec, carbon_id):
             return "Tool 'message_manager': Error: message is required"
         status = send_manager_message(carbon_id, target_carbon_id, message)
         return f"Tool 'message_manager' (to {target_carbon_id}): {status}"
+
+    elif tool_name == "message_silicon":
+        silicon_id = tool_spec.get("silicon_id", "")
+        message = tool_spec.get("message", "")
+        kind = tool_spec.get("kind", "text")
+        attachment_path = tool_spec.get("attachment_path")
+        if not silicon_id:
+            return "Tool 'message_silicon': Error: silicon_id is required"
+        if kind == "text" and not message:
+            return "Tool 'message_silicon': Error: message is required for text messages"
+        if kind != "text" and not attachment_path:
+            return "Tool 'message_silicon': Error: attachment_path is required for non-text messages"
+        try:
+            send_silicon_message(
+                silicon_id,
+                body=message,
+                kind=kind,
+                attachment_path=attachment_path,
+            )
+            return f"Tool 'message_silicon' (to {silicon_id}): Message sent"
+        except Exception as e:
+            return f"Tool 'message_silicon' (to {silicon_id}): Error: {e}"
 
     elif tool_name.startswith("worker"):
         worker_type, action_type, worker_id = _parse_worker_tool(tool_spec)

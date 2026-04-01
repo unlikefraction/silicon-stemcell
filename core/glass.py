@@ -1,12 +1,16 @@
 import io
 import json
 import tarfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
 
 CONFIG_FILE = ".glass.json"
 IGNORE_NAMES = {".git", "__pycache__", ".DS_Store", CONFIG_FILE}
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+CONTACTS_FILE = PROJECT_ROOT / "core" / "telegram" / "contacts.json"
+STATE_FILE = PROJECT_ROOT / "core" / "glass_state.json"
 
 
 def _find_glass_config(start=None):
@@ -23,6 +27,89 @@ def load_glass_config(start=None):
     if path is None:
         raise FileNotFoundError("No .glass.json found in this folder or its parents.")
     return json.loads(path.read_text()), path
+
+
+def _load_contacts():
+    if CONTACTS_FILE.exists():
+        return json.loads(CONTACTS_FILE.read_text())
+    return {"last_update_id": 0, "contacts": {}}
+
+
+def _save_contacts(data):
+    CONTACTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CONTACTS_FILE.write_text(json.dumps(data, indent=2))
+
+
+def _load_state():
+    if STATE_FILE.exists():
+        return json.loads(STATE_FILE.read_text())
+    return {"threads": {}}
+
+
+def _save_state(data):
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(json.dumps(data, indent=2))
+
+
+def _get_contact_by_silicon_id(contacts_data, silicon_id):
+    for carbon_id, info in contacts_data.get("contacts", {}).items():
+        if info.get("contact_type") == "silicon" and info.get("silicon_id") == silicon_id:
+            return carbon_id, info
+    return None, None
+
+
+def _ensure_silicon_contact(silicon_id):
+    contacts_data = _load_contacts()
+    carbon_id, info = _get_contact_by_silicon_id(contacts_data, silicon_id)
+    if carbon_id is not None:
+        return contacts_data, carbon_id, info, False
+
+    carbon_id = silicon_id
+    if carbon_id in contacts_data.get("contacts", {}):
+        raise ValueError(f"Contact id '{carbon_id}' already exists and is not a silicon contact.")
+    info = {
+        "name": silicon_id,
+        "contact_type": "silicon",
+        "silicon_id": silicon_id,
+        "trust_level": "very_low",
+        "is_central_carbon": False,
+        "relation": "",
+        "description": "",
+        "timezone": "",
+    }
+    contacts_data.setdefault("contacts", {})[carbon_id] = info
+    _save_contacts(contacts_data)
+    return contacts_data, carbon_id, info, True
+
+
+def _message_preview(message):
+    body = (message.get("body") or "").strip()
+    kind = message.get("kind") or "text"
+    attachment_name = message.get("attachment_name") or ""
+
+    if kind == "text":
+        return body
+
+    label = kind.capitalize()
+    if attachment_name:
+        preview = f"[{label} received: {attachment_name}]"
+    else:
+        preview = f"[{label} received]"
+    if body:
+        preview += f"\n{body}"
+    return preview
+
+
+def _timestamp_label(value):
+    if not value:
+        return ""
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("[%b %d, %I:%M %p UTC]")
 
 
 def _iter_files(folder):
@@ -103,6 +190,18 @@ def send_silicon_message(target_username, *, body="", kind="text", attachment_pa
     return response.json()
 
 
+def reply_to_silicon_contact(contact, message, start=None):
+    silicon_id = contact.get("silicon_id")
+    if not silicon_id:
+        return "Error: No silicon_id configured for this contact."
+    if "[file=" in message or "[voice=" in message:
+        return "Error: Glass silicon replies currently support plain text only."
+    if not message.strip():
+        return "Error: message is required"
+    send_silicon_message(silicon_id, body=message, kind="text", start=start)
+    return "Message sent"
+
+
 def list_silicon_threads(start=None):
     config, _ = load_glass_config(start)
     if "api_key" not in config:
@@ -131,3 +230,85 @@ def get_thread_messages(target_username, after=None, start=None):
     )
     response.raise_for_status()
     return response.json()
+
+
+def get_unread_silicon_messages(start=None):
+    try:
+        config, _ = load_glass_config(start)
+    except FileNotFoundError:
+        return {}
+    if "api_key" not in config or "silicon_username" not in config:
+        return {}
+
+    state = _load_state()
+    threads_data = list_silicon_threads(start=start)
+    threads = threads_data.get("threads", [])
+    own_silicon_id = config["silicon_username"]
+    contexts = {}
+    metadata = {}
+
+    for thread in threads:
+        other_silicon = thread.get("other_silicon")
+        if not other_silicon:
+            continue
+
+        last_seen = state.setdefault("threads", {}).get(other_silicon, {}).get("last_message_id")
+        payload = get_thread_messages(other_silicon, after=last_seen, start=start)
+        messages = payload.get("messages", [])
+        if not messages:
+            continue
+
+        max_seen = last_seen or 0
+        for message in messages:
+            message_id = message.get("id") or 0
+            if message_id > max_seen:
+                max_seen = message_id
+            if message.get("sender") == own_silicon_id:
+                continue
+
+            contacts_data, carbon_id, contact, is_new = _ensure_silicon_contact(other_silicon)
+            metadata.setdefault(
+                carbon_id,
+                {
+                    "is_new": is_new,
+                    "name": contact.get("name") or other_silicon,
+                    "silicon_id": other_silicon,
+                },
+            )
+            contexts.setdefault(carbon_id, [])
+
+            timestamp = _timestamp_label(message.get("created_at"))
+            reply_prefix = ""
+            if message.get("reply_to"):
+                reply_prefix = f"(replying to message {message['reply_to']}) "
+            line = _message_preview(message)
+            if not line:
+                continue
+            if timestamp:
+                line = f"{timestamp} {reply_prefix}{line}"
+            elif reply_prefix:
+                line = f"{reply_prefix}{line}"
+            contexts[carbon_id].append(line)
+
+        state["threads"][other_silicon] = {"last_message_id": max_seen}
+
+    _save_state(state)
+
+    result = {}
+    for carbon_id, messages in contexts.items():
+        if not messages:
+            continue
+        info = metadata[carbon_id]
+        if info["is_new"]:
+            prefix = (
+                f"NEW SILICON - First time message from {info['name']} "
+                f"(silicon_id: {info['silicon_id']}):"
+            )
+        else:
+            prefix = (
+                f"Messages from {info['name']} "
+                f"(silicon_id: {info['silicon_id']}):"
+            )
+        result[carbon_id] = prefix + "\n" + "\n---\n".join(messages)
+
+    return result

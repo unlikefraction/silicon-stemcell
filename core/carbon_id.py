@@ -11,6 +11,8 @@ OUTPUTS_DIR = os.path.join(PROJECT_ROOT, "worker", "outputs")
 ACTIVE_FILE = os.path.join(OUTPUTS_DIR, "_active_workers.json")
 BROWSER_QUEUE_FILE = os.path.join(OUTPUTS_DIR, "_browser_queue.json")
 ARCHIVE_META_FILE = os.path.join(OUTPUTS_DIR, "_archive_meta.json")
+CARBON_MEMORY_DIR = os.path.join(PROMPTS_DIR, "memory", "carbons")
+LEGACY_MEMORY_DIR = os.path.join(PROMPTS_DIR, "memory", "people")
 
 
 def change_carbon_id(old_id, new_id):
@@ -37,6 +39,9 @@ def change_carbon_id(old_id, new_id):
     if old_id not in contacts:
         return f"Error: carbon_id '{old_id}' not found in contacts."
 
+    if contacts[old_id].get("contact_type") == "silicon":
+        return "Error: change_carbon_id only works for Telegram carbon contacts."
+
     if new_id in contacts:
         return f"Error: carbon_id '{new_id}' already exists."
 
@@ -49,10 +54,15 @@ def change_carbon_id(old_id, new_id):
         json.dump(contacts_data, f, indent=2)
 
     # 2. Rename memory file
-    old_memory = os.path.join(PROMPTS_DIR, "memory", "people", f"{old_id}.md")
-    new_memory = os.path.join(PROMPTS_DIR, "memory", "people", f"{new_id}.md")
+    os.makedirs(CARBON_MEMORY_DIR, exist_ok=True)
+    old_memory = os.path.join(CARBON_MEMORY_DIR, f"{old_id}.md")
+    new_memory = os.path.join(CARBON_MEMORY_DIR, f"{new_id}.md")
     if os.path.exists(old_memory):
         os.rename(old_memory, new_memory)
+    else:
+        legacy_old_memory = os.path.join(LEGACY_MEMORY_DIR, f"{old_id}.md")
+        if os.path.exists(legacy_old_memory):
+            os.rename(legacy_old_memory, new_memory)
 
     # 3. Rename session file
     old_session = os.path.join(SESSIONS_DIR, f"{old_id}.txt")

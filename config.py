@@ -1,4 +1,5 @@
 from core.telegram import get_unread_messages
+from core.glass import get_unread_silicon_messages
 from core.cron import check_crons
 from core.messages import check_manager_messages
 from worker.handler import check_completed_workers_formatted, clean_old_archives
@@ -18,6 +19,12 @@ EVENT_LOOP = [
         "description": "Check if any cron jobs need to run",
         "execute": check_crons,
         "on_error": lambda e: print(f"[Cron Error] {e}", flush=True),
+    },
+    {
+        "name": "check_glass_messages",
+        "description": "Check if there are unread messages from other silicons on Glass",
+        "execute": get_unread_silicon_messages,
+        "on_error": lambda e: print(f"[Glass Error] {e}", flush=True),
     },
     {
         "name": "check_manager_messages",
