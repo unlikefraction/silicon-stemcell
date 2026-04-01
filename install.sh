@@ -277,6 +277,31 @@ install_glass_cli || true
 
 # ── Node.js / npm ─────────────────────────────────────────────
 
+install_git() {
+    if [ "$OS" = "mac" ]; then
+        if command -v brew &>/dev/null; then
+            info "Installing git via Homebrew..."
+            brew install git
+        else
+            error "Install git manually or install Homebrew first."
+            exit 1
+        fi
+    else
+        if command -v apt-get &>/dev/null; then
+            sudo apt-get update -qq && sudo apt-get install -y git
+        elif command -v dnf &>/dev/null; then
+            sudo dnf install -y git
+        elif command -v yum &>/dev/null; then
+            sudo yum install -y git
+        elif command -v pacman &>/dev/null; then
+            sudo pacman -S --noconfirm git
+        else
+            error "No supported package manager found to install git."
+            exit 1
+        fi
+    fi
+}
+
 install_node() {
     if [ "$OS" = "mac" ]; then
         if command -v brew &>/dev/null; then
@@ -323,6 +348,24 @@ else
     else
         error "Node.js is required for Claude Code CLI. Aborting."
         exit 1
+    fi
+fi
+
+# ── git ───────────────────────────────────────────────────────
+
+if command -v git &>/dev/null; then
+    success "git: $(git --version | head -1)"
+else
+    warn "git not found"
+    if confirm "Install git?"; then
+        install_git
+        if command -v git &>/dev/null; then
+            success "git installed: $(git --version | head -1)"
+        else
+            warn "git install did not succeed. Silicon can still run, but updates will use a weaker merge strategy."
+        fi
+    else
+        warn "Skipping git. Silicon can still run, but updates will use a weaker merge strategy."
     fi
 fi
 
@@ -446,6 +489,8 @@ else
     error "No git, curl, or wget found. Cannot download Silicon."
     exit 1
 fi
+
+snapshot_upstream_source "$INSTALL_DIR" "$INSTALL_DIR"
 
 # ── pip packages ──────────────────────────────────────────────
 
@@ -706,6 +751,16 @@ print("added")
 PY
 }
 
+snapshot_upstream_source() {
+    local source_dir="$1"
+    local target_dir="$2"
+    local updater="$source_dir/scripts/silicon_update.py"
+
+    if [ -f "$updater" ]; then
+        "$PYTHON_CMD" "$updater" snapshot --source "$source_dir" --target "$target_dir" >/dev/null 2>&1 || true
+    fi
+}
+
 download_stemcell_source() {
     local target_dir="$1"
     rm -rf "$target_dir"
@@ -845,6 +900,8 @@ for key, value in required.items():
         out.append(f'{key} = "{value}"')
 env_path.write_text("\\n".join(out).rstrip() + "\\n")
 PY
+
+    snapshot_upstream_source "$tmp_src" "$abs_target"
 
     local current_telegram=""
     local current_openai=""
@@ -1150,6 +1207,44 @@ cmd_browser() {
     "$PYTHON_CMD" main.py browser
 }
 
+ensure_git() {
+    if command -v git >/dev/null 2>&1; then
+        return 0
+    fi
+
+    warn "git not found. It's needed for the best merge strategy during updates."
+    printf "${BOLD}? Install git now? [Y/n]${RESET} "
+    local ans
+    read -r ans </dev/tty
+    case "$ans" in
+        [nN]*) return 1 ;;
+    esac
+
+    if [ "$(uname -s)" = "Darwin" ]; then
+        if command -v brew >/dev/null 2>&1; then
+            brew install git
+        else
+            error "Homebrew not found. Install git manually and retry."
+            return 1
+        fi
+    else
+        if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update -qq && sudo apt-get install -y git
+        elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y git
+        elif command -v yum >/dev/null 2>&1; then
+            sudo yum install -y git
+        elif command -v pacman >/dev/null 2>&1; then
+            sudo pacman -S --noconfirm git
+        else
+            error "No supported package manager found to install git."
+            return 1
+        fi
+    fi
+
+    command -v git >/dev/null 2>&1
+}
+
 cmd_pull() {
     local username="$1"
     if [ -z "$username" ]; then
@@ -1306,7 +1401,7 @@ PY
     info "Registered as a silicon instance."
 }
 
-cmd_update() {
+cmd_update_script() {
     # Update the silicon CLI script (not the instances themselves)
     info "Updating silicon CLI..."
     local script_url="https://raw.githubusercontent.com/unlikefraction/silicon-stemcell/main/install.sh"
@@ -1339,6 +1434,53 @@ cmd_update() {
     fi
 
     rm -f "$tmp_script" "$new_cli"
+}
+
+cmd_update_instance() {
+    local target="$1"
+    local inst
+
+    if [ -n "$target" ]; then
+        inst=$(find_installation "$target") || { error "Silicon '$target' not found"; exit 1; }
+    else
+        inst=$(find_installation) || inst=$(pick_installation)
+    fi
+
+    IFS='|' read -r idx name path pid_file <<< "$inst"
+
+    if [ "$(is_running "$pid_file")" = "running" ]; then
+        error "'$name' is running. Stop it first with: silicon stop $name"
+        exit 1
+    fi
+
+    ensure_git || warn "Proceeding without git. Some non-conflicting merges may be skipped."
+
+    local tmp_src
+    tmp_src=$(mktemp -d /tmp/silicon-update-src-XXXXXX)
+    trap 'rm -rf "$tmp_src"' RETURN
+
+    info "Downloading latest Silicon source..."
+    download_stemcell_source "$tmp_src"
+
+    local updater="$tmp_src/scripts/silicon_update.py"
+    if [ ! -f "$updater" ]; then
+        error "Downloaded source did not include the updater script."
+        exit 1
+    fi
+
+    info "Updating '$name' safely..."
+    if "$PYTHON_CMD" "$updater" update --source "$tmp_src" --target "$path"; then
+        success "'$name' updated successfully"
+    else
+        local status=$?
+        if [ "$status" -eq 2 ]; then
+            error "Update aborted because merge conflicts were detected."
+            info "No local files were overwritten."
+        else
+            error "Update failed."
+        fi
+        exit "$status"
+    fi
 }
 
 cmd_debug() {
@@ -1516,6 +1658,7 @@ cmd_help() {
     printf "  silicon debug [name]        Attach to running instance (live logs)\n"
     printf "  silicon attach [path]       Register an existing silicon instance\n"
     printf "  silicon pull <username>     Pull a silicon from Glass into a new folder\n"
+    printf "  silicon update [name]       Update a silicon instance to latest without overwriting local changes\n"
     printf "  silicon list                List all instances\n"
     printf "  silicon script update       Update the silicon CLI script\n"
     printf "  silicon install             Install a new instance\n"
@@ -1527,7 +1670,7 @@ cmd_help() {
 
 suggest_command() {
     local input="$1"
-    local commands="start stop status browser debug attach pull list install new help script"
+    local commands="start stop status browser debug attach pull update list install new help script"
     local best_match=""
     local best_score=999
 
@@ -1584,10 +1727,11 @@ case "$CMD" in
     debug)   cmd_debug "$ARG" ;;
     attach)  cmd_attach "$ARG" ;;
     pull)    cmd_pull "$ARG" ;;
+    update)  cmd_update_instance "$ARG" ;;
     list|ls) cmd_list ;;
     script)
         case "$ARG" in
-            update) cmd_update ;;
+            update) cmd_update_script ;;
             *) error "Unknown script command: $ARG. Did you mean: silicon script update?"; exit 1 ;;
         esac
         ;;

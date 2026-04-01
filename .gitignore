@@ -23,3 +23,4 @@ core/telegram/media/
 # Runtime state
 .restart_pending
 .DS_Store
+.silicon-upstream/

@@ -67,6 +67,7 @@ silicon browser          # Open browser for manual login
 silicon pull myagent     # Pull a silicon from Glass into ./myagent
 silicon list             # List all installed instances
 silicon status           # Show status
+silicon update myagent   # Update an instance when it can merge safely
 silicon install          # Install another instance
 silicon help             # Show help
 ```

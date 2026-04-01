@@ -181,6 +181,31 @@ if ($hasNode -and $hasNpm) {
     }
 }
 
+# ── git ───────────────────────────────────────────────────────
+
+if (Get-Command git -ErrorAction SilentlyContinue) {
+    Write-Ok "git: $(git --version)"
+} else {
+    Write-Warn "git not found"
+    if (Read-Confirm "Install git?") {
+        $hasWinget = $null -ne (Get-Command winget -ErrorAction SilentlyContinue)
+        if ($hasWinget) {
+            Write-Info "Installing git via winget..."
+            winget install Git.Git --accept-source-agreements --accept-package-agreements
+            $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+            if (Get-Command git -ErrorAction SilentlyContinue) {
+                Write-Ok "git installed: $(git --version)"
+            } else {
+                Write-Warn "git install did not succeed. Updates will use a weaker merge strategy."
+            }
+        } else {
+            Write-Warn "winget not found. Install git manually for the best update merge strategy."
+        }
+    } else {
+        Write-Warn "Skipping git. Updates will use a weaker merge strategy."
+    }
+}
+
 # ── Claude Code CLI ───────────────────────────────────────────
 
 if (Get-Command claude -ErrorAction SilentlyContinue) {
@@ -277,6 +302,11 @@ if (-not $SkipClone) {
         Write-Err "Aborting."
         exit 1
     }
+}
+
+$UpdaterScript = Join-Path $InstallDir "scripts\silicon_update.py"
+if (Test-Path $UpdaterScript) {
+    & $PythonCmd $UpdaterScript snapshot --source $InstallDir --target $InstallDir *> $null
 }
 
 # ── pip packages ──────────────────────────────────────────────
@@ -394,6 +424,7 @@ param([string]$Command, [string]$Arg)
 
 $RegistryDir  = Join-Path $env:USERPROFILE ".silicon"
 $RegistryFile = Join-Path $RegistryDir "registry.json"
+$RepoZip = "https://github.com/unlikefraction/silicon-stemcell/archive/refs/heads/main.zip"
 
 function Write-Err  { param($m) Write-Host "✗ " -ForegroundColor Red    -NoNewline; Write-Host $m }
 function Write-Info { param($m) Write-Host "→ " -ForegroundColor Blue   -NoNewline; Write-Host $m }
@@ -563,6 +594,74 @@ function Invoke-Browser {
     Pop-Location
 }
 
+function Ensure-Git {
+    if (Get-Command git -ErrorAction SilentlyContinue) { return $true }
+    Write-Warn "git not found. It's needed for the best merge strategy during updates."
+    if (-not (Read-Confirm "Install git now?")) { return $false }
+
+    $hasWinget = $null -ne (Get-Command winget -ErrorAction SilentlyContinue)
+    if (-not $hasWinget) {
+        Write-Err "winget not found. Install git manually and retry."
+        return $false
+    }
+
+    Write-Info "Installing git via winget..."
+    winget install Git.Git --accept-source-agreements --accept-package-agreements
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+    return ($null -ne (Get-Command git -ErrorAction SilentlyContinue))
+}
+
+function Invoke-Update {
+    param([string]$Target)
+    $inst = if ($Target) { Find-Installation $Target } else { Find-Installation }
+    if (-not $inst) { $inst = Select-Installation }
+
+    if (Test-Running $inst.pid_file) {
+        Write-Err "'$($inst.name)' is running. Stop it first with: silicon stop $($inst.name)"
+        exit 1
+    }
+
+    if (-not (Ensure-Git)) {
+        Write-Warn "Proceeding without git. Some safe auto-merges may be skipped."
+    }
+
+    $tmpRoot = Join-Path $env:TEMP ("silicon-update-" + [guid]::NewGuid().ToString("N"))
+    $tmpZip  = "$tmpRoot.zip"
+    New-Item -ItemType Directory -Path $tmpRoot -Force | Out-Null
+    try {
+        Write-Info "Downloading latest Silicon source..."
+        Invoke-WebRequest -Uri $RepoZip -OutFile $tmpZip -UseBasicParsing
+        Expand-Archive -Path $tmpZip -DestinationPath $tmpRoot -Force
+        $sourceDir = Get-ChildItem $tmpRoot -Directory | Select-Object -First 1
+        if (-not $sourceDir) {
+            Write-Err "Could not find extracted source directory."
+            exit 1
+        }
+
+        $updater = Join-Path $sourceDir.FullName "scripts\silicon_update.py"
+        if (-not (Test-Path $updater)) {
+            Write-Err "Downloaded source did not include the updater script."
+            exit 1
+        }
+
+        Write-Info "Updating '$($inst.name)' safely..."
+        & $PythonCmd $updater update --source $sourceDir.FullName --target $inst.path
+        if ($LASTEXITCODE -eq 0) {
+            Write-Ok "'$($inst.name)' updated successfully"
+        } elseif ($LASTEXITCODE -eq 2) {
+            Write-Err "Update aborted because merge conflicts were detected."
+            Write-Info "No local files were overwritten."
+            exit 2
+        } else {
+            Write-Err "Update failed."
+            exit $LASTEXITCODE
+        }
+    } finally {
+        Remove-Item $tmpZip -Force -ErrorAction SilentlyContinue
+        Remove-Item $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Invoke-Install {
     $url = "https://raw.githubusercontent.com/unlikefraction/silicon-stemcell/main/install.ps1"
     irm $url | iex
@@ -576,6 +675,7 @@ function Invoke-Help {
     Write-Host "  silicon stop [name]         Stop a running instance"
     Write-Host "  silicon status [name]       Show instance status"
     Write-Host "  silicon browser [name]      Open headed browser for login"
+    Write-Host "  silicon update [name]       Update a silicon instance to latest without overwriting local changes"
     Write-Host "  silicon list                List all instances"
     Write-Host "  silicon install             Install a new instance"
     Write-Host "  silicon help                Show this help"
@@ -589,6 +689,7 @@ switch ($Command) {
     "stop"    { Invoke-Stop $Arg }
     "status"  { Invoke-Status $Arg }
     "browser" { Invoke-Browser $Arg }
+    "update"  { Invoke-Update $Arg }
     { $_ -in "list", "ls" } { Invoke-List }
     "install" { Invoke-Install }
     { $_ -in "help", "-h", "--help" } { Invoke-Help }
