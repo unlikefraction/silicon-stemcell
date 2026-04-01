@@ -14,6 +14,9 @@ from typing import Optional, Tuple
 META_DIR_NAME = ".silicon-upstream"
 BASE_DIR_NAME = "base"
 META_FILE_NAME = "meta.json"
+REPO_URL = "https://github.com/unlikefraction/silicon-stemcell.git"
+MIN_INFERENCE_MATCHES = 3
+MAX_INFERENCE_CANDIDATES = 12
 
 IGNORE_EXACT = {
     ".DS_Store",
@@ -52,6 +55,9 @@ def normalize_rel(path: Path) -> str:
 
 
 def should_ignore(rel: str) -> bool:
+    parts = rel.split("/")
+    if "__pycache__" in parts or rel.endswith((".pyc", ".pyo")):
+        return True
     if rel in IGNORE_EXACT:
         return True
     return any(rel.startswith(prefix) for prefix in IGNORE_PREFIXES)
@@ -108,13 +114,15 @@ def replace_dir_contents(dst: Path, src: Path) -> None:
         shutil.copy2(src_path, target)
 
 
-def save_meta(target: Path, source: Path) -> None:
+def save_meta(target: Path, source: Path, extra: Optional[dict] = None) -> None:
     meta_dir = target / META_DIR_NAME
     meta_dir.mkdir(parents=True, exist_ok=True)
     meta = {
         "source": str(source),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    if extra:
+        meta.update(extra)
     (meta_dir / META_FILE_NAME).write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 
 
@@ -136,6 +144,150 @@ def git_merge_file(local: bytes, base: bytes, upstream: bytes, rel: str) -> Tupl
         return False, proc.stdout
 
 
+def run_git(args: list[str], cwd: Path, input_bytes: Optional[bytes] = None, check: bool = True) -> subprocess.CompletedProcess:
+    proc = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        input=input_bytes,
+        capture_output=True,
+    )
+    if check and proc.returncode != 0:
+        raise RuntimeError(proc.stderr.decode("utf-8", errors="ignore").strip() or f"git {' '.join(args)} failed")
+    return proc
+
+
+def prepare_history_repo(source: Path) -> Tuple[Optional[Path], Optional[tempfile.TemporaryDirectory]]:
+    if (source / ".git").exists():
+        return source, None
+
+    script_repo = Path(__file__).resolve().parent.parent
+    if (script_repo / ".git").exists():
+        return script_repo, None
+
+    if shutil.which("git") is None:
+        return None, None
+
+    temp_dir = tempfile.TemporaryDirectory(prefix="silicon-history-")
+    history_repo = Path(temp_dir.name) / "repo"
+    proc = subprocess.run(
+        ["git", "clone", "--quiet", REPO_URL, str(history_repo)],
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        temp_dir.cleanup()
+        return None, None
+    return history_repo, temp_dir
+
+
+def score_commit(history_repo: Path, commit: str, local_files: dict[str, Path]) -> Tuple[int, int]:
+    score = 0
+    shared = 0
+    for rel, local_path in local_files.items():
+        proc = run_git(["show", f"{commit}:{rel}"], cwd=history_repo, check=False)
+        if proc.returncode != 0:
+            continue
+        shared += 1
+        if proc.stdout == local_path.read_bytes():
+            score += 1
+    return score, shared
+
+
+def materialize_commit(history_repo: Path, commit: str, destination: Path) -> None:
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    archive_path = destination.parent / f"{commit}.tar"
+    try:
+        run_git(["archive", "-o", str(archive_path), commit], cwd=history_repo)
+        shutil.unpack_archive(str(archive_path), str(destination), format="tar")
+    finally:
+        archive_path.unlink(missing_ok=True)
+
+
+def infer_base_commit(source: Path, target: Path) -> Optional[tuple[str, int, int]]:
+    history_repo, temp_dir = prepare_history_repo(source)
+    if history_repo is None:
+        return None
+
+    try:
+        local_files = collect_files(target)
+        if not local_files:
+            return None
+
+        candidate_hits: dict[str, int] = {}
+
+        for rel, local_path in sorted(local_files.items()):
+            blob_hash = run_git(["hash-object", "--stdin"], cwd=history_repo, input_bytes=local_path.read_bytes()).stdout.decode("utf-8").strip()
+            if not blob_hash:
+                continue
+            proc = run_git(
+                ["log", "--all", "--format=%H", f"--find-object={blob_hash}", "--", rel],
+                cwd=history_repo,
+                check=False,
+            )
+            if proc.returncode != 0:
+                continue
+            commits = {line.strip() for line in proc.stdout.decode("utf-8", errors="ignore").splitlines() if line.strip()}
+            for commit in commits:
+                candidate_hits[commit] = candidate_hits.get(commit, 0) + 1
+
+        if not candidate_hits:
+            return None
+
+        ranked = sorted(candidate_hits.items(), key=lambda item: (-item[1], item[0]))[:MAX_INFERENCE_CANDIDATES]
+        best_commit = None
+        best_score = -1
+        best_shared = 0
+
+        for commit, _ in ranked:
+            score, shared = score_commit(history_repo, commit, local_files)
+            if score > best_score or (score == best_score and shared > best_shared):
+                best_commit = commit
+                best_score = score
+                best_shared = shared
+
+        if best_commit is None or best_score < MIN_INFERENCE_MATCHES:
+            return None
+
+        return best_commit, best_score, best_shared
+    finally:
+        if temp_dir is not None:
+            temp_dir.cleanup()
+
+
+def ensure_base_snapshot(source: Path, target: Path) -> bool:
+    base_dir = target / META_DIR_NAME / BASE_DIR_NAME
+    if collect_files(base_dir):
+        return True
+
+    inferred = infer_base_commit(source, target)
+    if inferred is None:
+        return False
+
+    commit, score, shared = inferred
+    history_repo, temp_dir = prepare_history_repo(source)
+    if history_repo is None:
+        return False
+
+    try:
+        materialize_commit(history_repo, commit, base_dir)
+    finally:
+        if temp_dir is not None:
+            temp_dir.cleanup()
+
+    save_meta(
+        target,
+        source,
+        {
+            "inferred_base_commit": commit,
+            "inferred_base_matches": score,
+            "inferred_base_shared": shared,
+        },
+    )
+    print(f"Inferred legacy upstream base: {commit[:12]} ({score} exact file matches, {shared} shared files)")
+    return True
+
+
 def snapshot(source: Path, target: Path) -> int:
     base_dir = target / META_DIR_NAME / BASE_DIR_NAME
     replace_dir_contents(base_dir, source)
@@ -145,17 +297,23 @@ def snapshot(source: Path, target: Path) -> int:
 
 
 def update(source: Path, target: Path) -> int:
+    if not ensure_base_snapshot(source, target):
+        print("Update aborted. No upstream base snapshot exists, and the original upstream version could not be inferred safely.", file=sys.stderr)
+        print("No files were changed.", file=sys.stderr)
+        return 2
+
     upstream_files = collect_files(source)
     base_dir = target / META_DIR_NAME / BASE_DIR_NAME
     base_files = collect_files(base_dir)
     target_files = collect_files(target)
 
     writes: list[tuple[Path, bytes, Path]] = []
+    base_writes: list[tuple[Path, bytes, Path]] = []
     added = 0
     updated = 0
     merged = 0
     kept_local = 0
-    conflicts: list[str] = []
+    preserved_local_conflicts: list[str] = []
 
     git_available = shutil.which("git") is not None
 
@@ -169,48 +327,52 @@ def update(source: Path, target: Path) -> int:
 
         if local_bytes is None:
             writes.append((local_path, upstream_bytes, upstream_path))
+            base_writes.append((base_path, upstream_bytes, upstream_path))
             added += 1
             continue
 
         if local_bytes == upstream_bytes:
+            base_writes.append((base_path, upstream_bytes, upstream_path))
             continue
 
         if base_bytes is None:
-            conflicts.append(rel)
+            preserved_local_conflicts.append(rel)
             continue
 
         if local_bytes == base_bytes:
             writes.append((local_path, upstream_bytes, upstream_path))
+            base_writes.append((base_path, upstream_bytes, upstream_path))
             updated += 1
             continue
 
         if upstream_bytes == base_bytes:
             kept_local += 1
+            base_writes.append((base_path, upstream_bytes, upstream_path))
             continue
 
         if git_available and is_text_path(local_path, local_bytes) and is_text_path(base_path, base_bytes) and is_text_path(upstream_path, upstream_bytes):
             ok, merged_bytes = git_merge_file(local_bytes, base_bytes, upstream_bytes, rel)
             if ok:
                 writes.append((local_path, merged_bytes, upstream_path))
+                base_writes.append((base_path, upstream_bytes, upstream_path))
                 merged += 1
                 continue
 
-        conflicts.append(rel)
-
-    if conflicts:
-        print("Update aborted. Merge conflicts detected in these files:", file=sys.stderr)
-        for rel in conflicts:
-            print(f"  - {rel}", file=sys.stderr)
-        print("No files were changed.", file=sys.stderr)
-        return 2
+        preserved_local_conflicts.append(rel)
 
     for path, data, mode_source in writes:
         write_file(path, data, mode_source)
 
-    replace_dir_contents(base_dir, source)
+    for path, data, mode_source in base_writes:
+        write_file(path, data, mode_source)
+
     save_meta(target, source)
 
     print(f"Updated safely: {updated} replaced, {merged} auto-merged, {added} added, {kept_local} kept-local.")
+    if preserved_local_conflicts:
+        print("Preserved local versions for these files because a clean merge was not possible:")
+        for rel in preserved_local_conflicts:
+            print(f"  - {rel}")
     if not writes:
         print("Already up to date or all local changes were preserved without upstream edits.")
     return 0
