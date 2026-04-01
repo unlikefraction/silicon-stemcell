@@ -143,29 +143,59 @@ fi
 header "Step 2 · Prerequisites"
 
 install_glass_cli() {
-    local glass_installer="https://raw.githubusercontent.com/unlikefraction/glass/main/install.sh"
+    local glass_repo="unlikefraction/glass"
+    local glass_archive="https://codeload.github.com/${glass_repo}/tar.gz/refs/heads/main"
+    local glass_dir="$HOME/.glass"
+    local glass_bin_dir="$HOME/.local/bin"
+    local glass_wrapper="$glass_bin_dir/glass"
     if command -v glass &>/dev/null; then
         success "glass CLI: installed"
         return 0
     fi
 
     warn "glass CLI not found"
+    mkdir -p "$glass_dir" "$glass_bin_dir"
+    local tmp_dir
+    tmp_dir=$(mktemp -d /tmp/glass-install-XXXXXX)
+    trap 'rm -rf "$tmp_dir"' RETURN
+
+    info "Installing glass CLI..."
     if command -v curl &>/dev/null; then
-        info "Installing glass CLI..."
-        if curl -fsSL "$glass_installer" | bash; then
-            success "glass CLI installed"
-            return 0
-        fi
+        curl -fsSL "$glass_archive" | tar -xzf - -C "$tmp_dir"
     elif command -v wget &>/dev/null; then
-        info "Installing glass CLI..."
-        if wget -qO- "$glass_installer" | bash; then
-            success "glass CLI installed"
-            return 0
-        fi
+        wget -qO- "$glass_archive" | tar -xzf - -C "$tmp_dir"
+    else
+        warn "Could not auto-install glass CLI. Need curl or wget."
+        return 1
     fi
 
-    warn "Could not auto-install glass CLI. You can install it later with:"
-    warn "curl -fsSL $glass_installer | bash"
+    local src_dir
+    src_dir=$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d -name 'glass-*' | head -1)
+    if [ -z "$src_dir" ] || [ ! -f "$src_dir/glass" ] || [ ! -f "$src_dir/glass_cli.py" ]; then
+        warn "Could not auto-install glass CLI. Downloaded archive was invalid."
+        return 1
+    fi
+
+    rm -rf "$glass_dir"
+    mkdir -p "$glass_dir"
+    (
+        cd "$src_dir"
+        tar --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' -cf - .
+    ) | (
+        cd "$glass_dir"
+        tar -xf -
+    )
+
+    chmod +x "$glass_dir/glass" "$glass_dir/install.sh"
+    ln -sf "$glass_dir/glass" "$glass_wrapper"
+
+    if command -v glass &>/dev/null; then
+        success "glass CLI installed"
+        return 0
+    fi
+
+    warn "glass CLI install finished, but it's not on PATH yet."
+    warn "Add ~/.local/bin to PATH."
     return 1
 }
 
@@ -630,15 +660,7 @@ ensure_glass_cli() {
     fi
 
     info "glass CLI not found. Installing it..."
-    local glass_installer="https://raw.githubusercontent.com/unlikefraction/glass/main/install.sh"
-    if command -v curl &>/dev/null; then
-        curl -fsSL "$glass_installer" | bash
-    elif command -v wget &>/dev/null; then
-        wget -qO- "$glass_installer" | bash
-    else
-        error "Need curl or wget to install glass CLI"
-        exit 1
-    fi
+    install_glass_cli || true
 
     command -v glass >/dev/null 2>&1 || {
         error "glass CLI installation failed"
