@@ -662,22 +662,39 @@ fi
 # ── Registry helpers ──────────────────────────────────────────
 
 get_installations() {
-    "$PYTHON_CMD" -c "
+    "$PYTHON_CMD" - <<PY 2>/dev/null
 import json
-with open('$REGISTRY_FILE') as f:
+with open("$REGISTRY_FILE") as f:
     reg = json.load(f)
-for i, inst in enumerate(reg.get('installations', [])):
-    print(f\"{i}|{inst['name']}|{inst['path']}|{inst.get('pid_file', '')}\")
-" 2>/dev/null
+for i, inst in enumerate(reg.get("installations", [])):
+    print(f"{i}|{inst['name']}|{inst['path']}|{inst.get('pid_file', '')}")
+PY
 }
 
 get_count() {
-    "$PYTHON_CMD" -c "
+    "$PYTHON_CMD" - <<PY 2>/dev/null
 import json
-with open('$REGISTRY_FILE') as f:
+with open("$REGISTRY_FILE") as f:
     reg = json.load(f)
-print(len(reg.get('installations', [])))
-" 2>/dev/null
+print(len(reg.get("installations", [])))
+PY
+}
+
+python_capture_to() {
+    local __var_name="$1"
+    local tmp_script
+    local tmp_output
+    local status
+    local value
+    tmp_script=$(mktemp /tmp/silicon-python-XXXXXX.py)
+    tmp_output=$(mktemp /tmp/silicon-python-out-XXXXXX)
+    cat > "$tmp_script"
+    "$PYTHON_CMD" "$tmp_script" > "$tmp_output"
+    status=$?
+    value=$(cat "$tmp_output")
+    rm -f "$tmp_script" "$tmp_output"
+    printf -v "$__var_name" '%s' "$value"
+    return "$status"
 }
 
 is_running() {
@@ -816,7 +833,7 @@ hydrate_silicon_dir() {
     download_stemcell_source "$tmp_src"
 
     local instance_name
-    instance_name=$("$PYTHON_CMD" - <<PY
+    python_capture_to instance_name <<PY
 import json, pathlib
 target = pathlib.Path("$abs_target")
 silicon_path = target / "silicon.json"
@@ -831,7 +848,6 @@ if not name:
     name = target.name
 print(name)
 PY
-)
 
     info "Hydrating $abs_target..."
     "$PYTHON_CMD" - <<PY
@@ -906,20 +922,18 @@ PY
     local current_telegram=""
     local current_openai=""
     if [ -f "$abs_target/env.py" ]; then
-        current_telegram=$("$PYTHON_CMD" - <<PY
+        python_capture_to current_telegram <<PY
 import pathlib, re
 text = pathlib.Path("$abs_target/env.py").read_text()
 m = re.search(r'^TELEGRAM_BOT_TOKEN\\s*=\\s*["\\'](.*)["\\']\\s*$', text, re.M)
 print(m.group(1) if m else "")
 PY
-)
-        current_openai=$("$PYTHON_CMD" - <<PY
+        python_capture_to current_openai <<PY
 import pathlib, re
 text = pathlib.Path("$abs_target/env.py").read_text()
 m = re.search(r'^OPENAI_API_KEY\\s*=\\s*["\\'](.*)["\\']\\s*$', text, re.M)
 print(m.group(1) if m else "")
 PY
-)
     fi
 
     if [ -t 0 ] && [ -t 1 ]; then
@@ -1272,17 +1286,16 @@ cmd_pull() {
     mkdir -p "$target_dir"
 
     local folder_fingerprint
-    folder_fingerprint=$("$PYTHON_CMD" - <<PY
+    python_capture_to folder_fingerprint <<PY
 import hashlib, pathlib, socket
 target = pathlib.Path("$target_dir").resolve()
 print(hashlib.sha256(f"{socket.gethostname()}::{target}".encode()).hexdigest())
 PY
-)
 
     local claim_file
     claim_file="$(mktemp /tmp/silicon-pull-claim-XXXXXX.json)"
     local payload
-    payload=$("$PYTHON_CMD" - <<PY
+    python_capture_to payload <<PY
 import json
 print(json.dumps({
     "username": "$username",
@@ -1291,7 +1304,6 @@ print(json.dumps({
     "folder_fingerprint": "$folder_fingerprint",
 }))
 PY
-)
 
     local http_code
     http_code=$(curl -sS -o "$claim_file" -w "%{http_code}" \
@@ -1301,7 +1313,7 @@ PY
 
     if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
         local err
-        err=$("$PYTHON_CMD" - <<PY
+        python_capture_to err <<PY
 import json
 try:
     data = json.load(open("$claim_file"))
@@ -1309,7 +1321,6 @@ try:
 except Exception:
     print("Pull claim failed.")
 PY
-)
         rm -rf "$target_dir" "$claim_file"
         error "$err"
         exit 1
@@ -1319,21 +1330,21 @@ PY
     archive_file="$(mktemp /tmp/silicon-pull-archive-XXXXXX.tar.gz)"
 
     local has_snapshot
-    has_snapshot=$("$PYTHON_CMD" - <<PY
+    python_capture_to has_snapshot <<PY
 import json
 claim = json.load(open("$claim_file"))
 print("yes" if claim.get("has_snapshot") else "no")
 PY
-)
 
     if [ "$has_snapshot" = "yes" ]; then
-        curl -sS \
-            -H "X-Source-Token: $("$PYTHON_CMD" - <<PY
+        local source_token
+        python_capture_to source_token <<PY
 import json
 claim = json.load(open("$claim_file"))
 print(claim["source_token"])
 PY
-)" \
+        curl -sS \
+            -H "X-Source-Token: $source_token" \
             "$GLASS_SERVER_URL/sync/api/silicons/$username/latest.tar.gz" \
             -o "$archive_file"
         tar -xzf "$archive_file" -C "$target_dir"
@@ -1594,24 +1605,24 @@ cmd_attach() {
     fi
 
     # Register it
-    "$PYTHON_CMD" -c "
+    "$PYTHON_CMD" - <<PY
 import json, os
-reg_file = '$REGISTRY_FILE'
+reg_file = "$REGISTRY_FILE"
 if os.path.exists(reg_file):
     with open(reg_file) as f:
         reg = json.load(f)
 else:
-    reg = {'installations': []}
+    reg = {"installations": []}
 
-reg['installations'].append({
-    'name': '$instance_name',
-    'path': '$target_dir',
-    'pid_file': '$pid_file'
+reg["installations"].append({
+    "name": "$instance_name",
+    "path": "$target_dir",
+    "pid_file": "$pid_file"
 })
 
-with open(reg_file, 'w') as f:
+with open(reg_file, "w") as f:
     json.dump(reg, f, indent=2)
-"
+PY
 
     success "Attached '$instance_name' at $target_dir"
 
