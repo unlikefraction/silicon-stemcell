@@ -645,6 +645,94 @@ info()  { printf "${BLUE}→${RESET} %s\n" "$*"; }
 success() { printf "${GREEN}✓${RESET} %s\n" "$*"; }
 warn()  { printf "${YELLOW}⚠${RESET} %s\n" "$*"; }
 
+confirm() {
+    printf "${BOLD}? %s [Y/n]${RESET} " "$1"
+    local ans
+    read -r ans
+    case "$ans" in
+        [nN]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+read_secret() {
+    local prompt="$1"
+    printf "${BOLD}? %s:${RESET} " "$prompt" >&2
+    local val=""
+    local char=""
+    while IFS= read -r -s -n1 char; do
+        if [[ -z "$char" ]]; then
+            break
+        elif [[ "$char" == $'\x7f' ]] || [[ "$char" == $'\b' ]]; then
+            if [[ -n "$val" ]]; then
+                val="${val%?}"
+                printf "\b \b" >&2
+            fi
+        else
+            val="${val}${char}"
+            printf "*" >&2
+        fi
+    done
+    printf "\n" >&2
+    echo "$val"
+}
+
+install_glass_cli() {
+    local glass_repo="unlikefraction/glass"
+    local glass_archive="https://codeload.github.com/${glass_repo}/tar.gz/refs/heads/main"
+    local glass_dir="$HOME/.glass"
+    local glass_bin_dir="$HOME/.local/bin"
+    local glass_wrapper="$glass_bin_dir/glass"
+    if command -v glass &>/dev/null; then
+        return 0
+    fi
+
+    warn "glass CLI not found"
+    mkdir -p "$glass_dir" "$glass_bin_dir"
+    local tmp_dir
+    tmp_dir=$(mktemp -d /tmp/glass-install-XXXXXX)
+    trap 'rm -rf "$tmp_dir"' RETURN
+
+    info "Installing glass CLI..."
+    if command -v curl &>/dev/null; then
+        curl -fsSL "$glass_archive" | tar -xzf - -C "$tmp_dir"
+    elif command -v wget &>/dev/null; then
+        wget -qO- "$glass_archive" | tar -xzf - -C "$tmp_dir"
+    else
+        warn "Could not auto-install glass CLI. Need curl or wget."
+        return 1
+    fi
+
+    local src_dir
+    src_dir=$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d -name 'glass-*' | head -1)
+    if [ -z "$src_dir" ] || [ ! -f "$src_dir/glass" ] || [ ! -f "$src_dir/glass_cli.py" ]; then
+        warn "Could not auto-install glass CLI. Downloaded archive was invalid."
+        return 1
+    fi
+
+    rm -rf "$glass_dir"
+    mkdir -p "$glass_dir"
+    (
+        cd "$src_dir"
+        tar --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' -cf - .
+    ) | (
+        cd "$glass_dir"
+        tar -xf -
+    )
+
+    chmod +x "$glass_dir/glass" "$glass_dir/install.sh"
+    ln -sf "$glass_dir/glass" "$glass_wrapper"
+
+    if command -v glass &>/dev/null; then
+        success "glass CLI installed"
+        return 0
+    fi
+
+    warn "glass CLI install finished, but it's not on PATH yet."
+    warn "Add ~/.local/bin to PATH."
+    return 1
+}
+
 # Find python
 PYTHON_CMD=""
 for cmd in python3 python; do
@@ -958,6 +1046,33 @@ PY
             current_openai=$(read_secret "OpenAI API key (optional)")
         fi
 
+        # ── Terminal worker preference (codex detection) ──
+        local terminal_workers='["chatgpt", "claude"]'
+        if command -v codex &>/dev/null; then
+            echo ""
+            info "Detected that codex is installed."
+            printf "${BOLD}? Which do you prefer for terminal workers – claude or codex?${RESET} [claude]: "
+            local tw_choice
+            read -r tw_choice
+            tw_choice="${tw_choice:-claude}"
+            case "$tw_choice" in
+                codex)
+                    if confirm "Do you want to keep claude as fallback for terminal workers?"; then
+                        terminal_workers='["codex", "claude"]'
+                    else
+                        terminal_workers='["codex"]'
+                    fi
+                    ;;
+                *)
+                    if confirm "Do you want to keep codex as fallback for terminal workers?"; then
+                        terminal_workers='["claude", "codex"]'
+                    else
+                        terminal_workers='["claude"]'
+                    fi
+                    ;;
+            esac
+        fi
+
         "$PYTHON_CMD" - <<PY
 import pathlib, re
 env_path = pathlib.Path("$abs_target/env.py")
@@ -974,6 +1089,19 @@ def upsert(text, key, value):
 text = upsert(text, "TELEGRAM_BOT_TOKEN", """$current_telegram""")
 text = upsert(text, "OPENAI_API_KEY", """$current_openai""")
 env_path.write_text(text.rstrip() + "\\n")
+PY
+
+        # Update silicon.json with terminal worker preference
+        "$PYTHON_CMD" - <<PY
+import json, pathlib
+silicon_path = pathlib.Path("$abs_target/silicon.json")
+if silicon_path.exists():
+    try:
+        silicon = json.loads(silicon_path.read_text())
+    except json.JSONDecodeError:
+        silicon = {}
+    silicon["workers"] = {"terminal": $terminal_workers}
+    silicon_path.write_text(json.dumps(silicon, indent=4) + "\\n")
 PY
     fi
 
@@ -1088,6 +1216,101 @@ cmd_list() {
     echo ""
 }
 
+_kill_floaters() {
+    local target_path="$1"
+    local skip_pid="${2:-}"
+    local main_py="$target_path/main.py"
+
+    # Find python processes running this specific main.py (absolute path in command)
+    local pids
+    pids=$(ps -eo pid,command 2>/dev/null | grep "[p]ython.*$main_py" | awk '{print $1}')
+
+    for pid in $pids; do
+        [ -z "$pid" ] && continue
+        [ "$pid" = "$skip_pid" ] && continue
+        warn "Killing orphaned process (PID $pid) from $target_path"
+        kill "$pid" 2>/dev/null
+        sleep 1
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null
+        fi
+    done
+}
+
+_silicon_watchdog_loop() {
+    local name="$1"
+    local path="$2"
+    local pid_file="$3"
+    local log_file="$path/.silicon.log"
+    local main_py="$path/main.py"
+    local restart_delay=5
+    local max_rapid=5
+    local rapid_window=60
+    local child_pid=""
+
+    # On SIGTERM/SIGINT: kill python child, clean up, exit
+    trap '
+        if [ -n "$child_pid" ] && kill -0 "$child_pid" 2>/dev/null; then
+            kill "$child_pid" 2>/dev/null
+            for _i in $(seq 1 6); do
+                kill -0 "$child_pid" 2>/dev/null || break
+                sleep 0.5
+            done
+            kill -0 "$child_pid" 2>/dev/null && kill -9 "$child_pid" 2>/dev/null
+        fi
+        rm -f "$pid_file"
+        exit 0
+    ' TERM INT
+
+    # Track restart timestamps for crash loop detection
+    local restart_times=""
+
+    while true; do
+        # Kill any floating processes from this directory
+        _kill_floaters "$path" ""
+
+        # Run python as a background child so traps fire immediately
+        "$PYTHON_CMD" -u "$main_py" >> "$log_file" 2>&1 &
+        child_pid=$!
+        wait "$child_pid" 2>/dev/null
+        local exit_code=$?
+        child_pid=""
+
+        # Check if we were told to stop
+        if [ -f "$path/.silicon.stop" ]; then
+            rm -f "$path/.silicon.stop"
+            rm -f "$pid_file"
+            break
+        fi
+
+        # Crash loop detection
+        local now
+        now=$(date +%s)
+        restart_times="$restart_times $now"
+
+        # Count recent restarts within the rapid window
+        local cutoff=$((now - rapid_window))
+        local recent=0
+        local new_times=""
+        for t in $restart_times; do
+            if [ "$t" -ge "$cutoff" ]; then
+                recent=$((recent + 1))
+                new_times="$new_times $t"
+            fi
+        done
+        restart_times="$new_times"
+
+        if [ "$recent" -ge "$max_rapid" ]; then
+            echo "[silicon-watchdog] $(date): '$name' crashed $max_rapid times in ${rapid_window}s. Giving up." >> "$log_file"
+            rm -f "$pid_file"
+            break
+        fi
+
+        echo "[silicon-watchdog] $(date): '$name' exited (code $exit_code). Restarting in ${restart_delay}s..." >> "$log_file"
+        sleep "$restart_delay"
+    done
+}
+
 cmd_start() {
     local target="$1"
     local inst
@@ -1107,19 +1330,23 @@ cmd_start() {
         return
     fi
 
-    info "Starting '$name'..."
-    cd "$path"
+    # Clean up any orphaned processes from this directory
+    _kill_floaters "$path" ""
+    rm -f "$pid_file" "$path/.silicon.stop"
 
-    # Start in background
-    nohup "$PYTHON_CMD" -u main.py > "$path/.silicon.log" 2>&1 &
-    local new_pid=$!
-    echo "$new_pid" > "$pid_file"
+    info "Starting '$name' (with auto-restart)..."
+
+    # Launch the watchdog wrapper in background
+    _silicon_watchdog_loop "$name" "$path" "$pid_file" &
+    local wrapper_pid=$!
+    disown "$wrapper_pid" 2>/dev/null
+    echo "$wrapper_pid" > "$pid_file"
 
     # Brief wait to check it didn't crash immediately
-    sleep 1
-    if kill -0 "$new_pid" 2>/dev/null; then
-        success "'$name' started (PID $new_pid)"
-        info "Logs: $path/.silicon.log"
+    sleep 2
+    if kill -0 "$wrapper_pid" 2>/dev/null; then
+        success "'$name' started (PID $wrapper_pid)"
+        info "Auto-restart enabled. Logs: $path/.silicon.log"
     else
         error "'$name' failed to start. Check logs: $path/.silicon.log"
         rm -f "$pid_file"
@@ -1140,12 +1367,18 @@ cmd_stop() {
 
     if [ "$(is_running "$pid_file")" != "running" ]; then
         warn "'$name' is not running"
-        rm -f "$pid_file"
+        # Still clean up any floaters
+        _kill_floaters "$path" ""
+        rm -f "$pid_file" "$path/.silicon.stop"
         return
     fi
 
     local pid
     pid=$(get_pid "$pid_file")
+
+    # Signal wrapper to not restart after python exits
+    touch "$path/.silicon.stop"
+
     info "Stopping '$name' (PID $pid)..."
     kill "$pid" 2>/dev/null
 
@@ -1163,8 +1396,18 @@ cmd_stop() {
         kill -9 "$pid" 2>/dev/null
     fi
 
-    rm -f "$pid_file"
+    # Belt-and-suspenders: kill any remaining floaters
+    _kill_floaters "$path" ""
+
+    rm -f "$pid_file" "$path/.silicon.stop"
     success "'$name' stopped"
+}
+
+cmd_restart() {
+    local target="$1"
+    cmd_stop "$target"
+    sleep 1
+    cmd_start "$target"
 }
 
 cmd_status() {
@@ -1410,6 +1653,52 @@ PY
     rm -f "$claim_file" "$archive_file"
     success "Pulled '$username' into $target_dir"
     info "Registered as a silicon instance."
+
+    # ── Detect empty repository ──
+    # If the pulled folder only has bare-minimum files (silicon.json, env.py, .glass.json)
+    # it's likely an empty silicon that needs to be populated
+    local real_file_count
+    real_file_count=$("$PYTHON_CMD" - <<PY
+import pathlib
+target = pathlib.Path("$target_dir")
+bare_minimum = {".glass.json", "silicon.json", "env.py"}
+count = 0
+for f in target.iterdir():
+    if f.name.startswith(".") and f.name != ".glass.json":
+        continue
+    if f.name == "__pycache__":
+        continue
+    if f.name not in bare_minimum:
+        count += 1
+print(count)
+PY
+)
+    if [ "$real_file_count" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; then
+        echo ""
+        warn "This looks like an empty repository (only silicon.json and env.py)."
+        if confirm "Do you want to populate it with Silicon?"; then
+            hydrate_silicon_dir "$target_dir"
+        fi
+    fi
+
+    # ── Offer to enable backups ──
+    if [ -t 0 ] && [ -t 1 ]; then
+        echo ""
+        if confirm "Do you want to enable backups for this silicon?"; then
+            ensure_glass_cli
+            info "Running initial backup..."
+            if (cd "$target_dir" && glass push now); then
+                success "Backup complete."
+                info "Starting hourly backup loop in background..."
+                local push_pid_file="$target_dir/.glass-push.pid"
+                (cd "$target_dir" && nohup glass push > "$target_dir/.glass-push.log" 2>&1 & echo $! > "$push_pid_file")
+                success "Hourly backups running (PID $(cat "$push_pid_file")). Logs: $target_dir/.glass-push.log"
+                info "Use 'silicon push $username now' for a manual backup anytime."
+            else
+                warn "Initial backup failed. You can retry with: silicon push $username now"
+            fi
+        fi
+    fi
 }
 
 cmd_update_script() {
@@ -1524,6 +1813,65 @@ cmd_debug() {
     printf "${DIM}  Press Ctrl+C to detach${RESET}\n\n"
 
     tail -f "$log_file"
+}
+
+cmd_push() {
+    local target="$1"
+    local subcmd="$2"
+    local inst
+
+    if [ -n "$target" ]; then
+        inst=$(find_installation "$target") || { error "Silicon '$target' not found"; exit 1; }
+    else
+        inst=$(find_installation) || inst=$(pick_installation)
+    fi
+
+    IFS='|' read -r idx name path pid_file <<< "$inst"
+
+    if [ ! -f "$path/.glass.json" ]; then
+        error "'$name' is not connected to Glass. No .glass.json found."
+        exit 1
+    fi
+
+    ensure_glass_cli
+
+    case "${subcmd:-}" in
+        now)
+            info "Pushing '$name' to Glass..."
+            (cd "$path" && glass push now) && success "Backup complete." || error "Push failed."
+            ;;
+        stop)
+            local push_pid_file="$path/.glass-push.pid"
+            if [ -f "$push_pid_file" ]; then
+                local pid
+                pid=$(cat "$push_pid_file" 2>/dev/null)
+                if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                    kill "$pid" 2>/dev/null
+                    rm -f "$push_pid_file"
+                    success "Stopped backup loop for '$name'."
+                    return
+                fi
+            fi
+            warn "No backup loop running for '$name'."
+            rm -f "$push_pid_file"
+            ;;
+        *)
+            # Start the hourly loop in background
+            local push_pid_file="$path/.glass-push.pid"
+            if [ -f "$push_pid_file" ]; then
+                local existing_pid
+                existing_pid=$(cat "$push_pid_file" 2>/dev/null)
+                if [ -n "$existing_pid" ] && kill -0 "$existing_pid" 2>/dev/null; then
+                    warn "Backup loop already running for '$name' (PID $existing_pid)"
+                    return
+                fi
+            fi
+            info "Starting hourly backup loop for '$name'..."
+            (cd "$path" && glass push now) && success "Initial backup complete." || warn "Initial push failed, loop will retry in 1 hour."
+            (cd "$path" && nohup glass push > "$path/.glass-push.log" 2>&1 & echo $! > "$push_pid_file")
+            success "Hourly backups running (PID $(cat "$push_pid_file")). Logs: $path/.glass-push.log"
+            ;;
+    esac
 }
 
 cmd_attach() {
@@ -1662,13 +2010,17 @@ cmd_help() {
     printf "  silicon                     Show status or list instances\n"
     printf "  silicon new                 Create a new Silicon (same as install)\n"
     printf "  silicon new .               Hydrate current folder into a runnable silicon\n"
-    printf "  silicon start [name]        Start a silicon instance\n"
+    printf "  silicon start [name]        Start a silicon instance (with auto-restart)\n"
     printf "  silicon stop [name]         Stop a running instance\n"
+    printf "  silicon restart [name]      Restart a silicon instance\n"
     printf "  silicon status [name]       Show instance status\n"
     printf "  silicon browser [name]      Open headed browser for login\n"
     printf "  silicon debug [name]        Attach to running instance (live logs)\n"
     printf "  silicon attach [path]       Register an existing silicon instance\n"
     printf "  silicon pull <username>     Pull a silicon from Glass into a new folder\n"
+    printf "  silicon push [name]         Start hourly backup loop to Glass\n"
+    printf "  silicon push [name] now     Push a one-time backup to Glass\n"
+    printf "  silicon push [name] stop    Stop the hourly backup loop\n"
     printf "  silicon update [name]       Update a silicon instance to latest without overwriting local changes\n"
     printf "  silicon list                List all instances\n"
     printf "  silicon script update       Update the silicon CLI script\n"
@@ -1681,7 +2033,7 @@ cmd_help() {
 
 suggest_command() {
     local input="$1"
-    local commands="start stop status browser debug attach pull update list install new help script"
+    local commands="start stop restart status browser debug attach pull push update list install new help script"
     local best_match=""
     local best_score=999
 
@@ -1729,15 +2081,18 @@ suggest_command() {
 
 CMD="${1:-}"
 ARG="${2:-}"
+ARG3="${3:-}"
 
 case "$CMD" in
     start)   cmd_start "$ARG" ;;
     stop)    cmd_stop "$ARG" ;;
+    restart) cmd_restart "$ARG" ;;
     status)  cmd_status "$ARG" ;;
     browser) cmd_browser "$ARG" ;;
     debug)   cmd_debug "$ARG" ;;
     attach)  cmd_attach "$ARG" ;;
     pull)    cmd_pull "$ARG" ;;
+    push)    cmd_push "$ARG" "$ARG3" ;;
     update)  cmd_update_instance "$ARG" ;;
     list|ls) cmd_list ;;
     script)
