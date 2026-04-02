@@ -144,6 +144,9 @@ def get_manager_prompt(carbon_id):
         _read_prompt("MANAGER_TOOLS.md"),
     ])
 
+    if contact and contact.get("contact_type") == "silicon":
+        parts.append(_read_prompt("SILICON_MANAGER.md"))
+
     # Add carbon_id context
     identity_label = "silicon_id" if contact and contact.get("contact_type") == "silicon" else "carbon_id"
     parts.append(f"\n## Current Session\nYou are talking to contact {identity_label}: {carbon_id}\nTheir trust level: {trust_level}")
