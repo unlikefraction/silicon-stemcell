@@ -1,27 +1,29 @@
 #!/usr/bin/env python3
-"""Glass Agent — sidecar daemon that connects a silicon instance to Glass remote control."""
+"""Glass Agent — sidecar daemon that connects a silicon instance to Glass remote control.
+Tries WebSocket for real-time streaming, falls back to REST polling."""
 
 import json
 import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
 POLL_INTERVAL = 15
+WS_HEARTBEAT_INTERVAL = 10
 LOG_CHUNK_MAX = 50_000  # bytes
+REST_FALLBACK_CYCLES = 5  # poll cycles before retrying WS
 
 # ── Config ───────────────────────────────────────────────────
 
 
 def find_silicon_dir():
-    """Find the silicon directory (where this script lives)."""
     return Path(__file__).resolve().parent
 
 
 def load_config(silicon_dir):
-    """Load .glass.json config."""
     config_path = silicon_dir / ".glass.json"
     if not config_path.exists():
         return None
@@ -30,7 +32,6 @@ def load_config(silicon_dir):
 
 
 def get_silicon_name(silicon_dir):
-    """Get silicon instance name from silicon.json."""
     sj = silicon_dir / "silicon.json"
     if sj.exists():
         try:
@@ -41,17 +42,25 @@ def get_silicon_name(silicon_dir):
     return silicon_dir.name
 
 
+def build_ws_url(server_url):
+    """Convert https://... to wss://... /ws/agent/"""
+    url = server_url.rstrip("/")
+    if url.startswith("https://"):
+        return "wss://" + url[8:] + "/ws/agent/"
+    elif url.startswith("http://"):
+        return "ws://" + url[7:] + "/ws/agent/"
+    return None
+
+
 # ── HTTP helpers ─────────────────────────────────────────────
 
 
 def api_request(server_url, path, api_key, method="GET", data=None):
-    """Make an HTTP request to Glass. Uses urllib to avoid extra dependencies."""
     import urllib.error
     import urllib.request
 
     url = server_url.rstrip("/") + path
     headers = {"Authorization": f"Bearer {api_key}"}
-
     body = None
     if data is not None:
         body = json.dumps(data).encode("utf-8")
@@ -74,16 +83,13 @@ def api_request(server_url, path, api_key, method="GET", data=None):
 
 
 def detect_status(silicon_dir):
-    """Detect if the silicon process is running."""
     pid_file = silicon_dir / ".silicon.pid"
     stop_file = silicon_dir / ".silicon.stop"
-
     if not pid_file.exists():
         return "stopped"
-
     try:
         pid = int(pid_file.read_text().strip())
-        os.kill(pid, 0)  # check if alive
+        os.kill(pid, 0)
         return "running"
     except (ValueError, ProcessLookupError, PermissionError):
         if stop_file.exists():
@@ -95,7 +101,6 @@ def detect_status(silicon_dir):
 
 
 def execute_command(cmd, silicon_name):
-    """Execute a remote command using the silicon CLI."""
     action = cmd.get("command", "")
     try:
         if action == "start":
@@ -113,10 +118,7 @@ def execute_command(cmd, silicon_name):
             msg = result.stdout.strip() or result.stderr.strip() or "stopped"
             return "done", msg
         elif action == "restart":
-            subprocess.run(
-                ["silicon", "stop", silicon_name],
-                capture_output=True, text=True, timeout=30,
-            )
+            subprocess.run(["silicon", "stop", silicon_name], capture_output=True, text=True, timeout=30)
             time.sleep(1)
             result = subprocess.run(
                 ["silicon", "start", silicon_name],
@@ -141,18 +143,15 @@ class LogTailer:
     def __init__(self, log_path):
         self.path = log_path
         self.pos = 0
-        # Start from end of file
         if self.path.exists():
             self.pos = self.path.stat().st_size
 
     def read_new(self):
-        """Read new lines since last position. Returns string or empty."""
         if not self.path.exists():
             self.pos = 0
             return ""
         size = self.path.stat().st_size
         if size < self.pos:
-            # File was truncated/rotated
             self.pos = 0
         if size == self.pos:
             return ""
@@ -166,7 +165,114 @@ class LogTailer:
             return ""
 
 
-# ── Main loop ────────────────────────────────────────────────
+# ── WebSocket mode ───────────────────────────────────────────
+
+
+def run_websocket_loop(ws_url, api_key, silicon_name, silicon_dir, log_tailer, running_flag):
+    """Connect via WebSocket for real-time relay. Raises on disconnect."""
+    from websockets.sync.client import connect
+
+    print(f"[glass-agent] Connecting to {ws_url}", flush=True)
+    with connect(ws_url, close_timeout=5, open_timeout=10) as ws:
+        # Auth
+        ws.send(json.dumps({"type": "auth", "token": api_key}))
+        resp = json.loads(ws.recv(timeout=5))
+        if resp.get("type") != "auth_ok":
+            raise ConnectionError(f"Auth failed: {resp.get('reason', 'unknown')}")
+
+        print(f"[glass-agent] WebSocket connected (live mode)", flush=True)
+
+        # Sender thread: heartbeats + logs
+        sender_stop = threading.Event()
+
+        def sender():
+            while not sender_stop.is_set() and running_flag[0]:
+                try:
+                    status = detect_status(silicon_dir)
+                    ws.send(json.dumps({"type": "heartbeat", "status": status}))
+                    new_lines = log_tailer.read_new()
+                    if new_lines:
+                        ws.send(json.dumps({"type": "log", "lines": new_lines}))
+                except Exception:
+                    break
+                sender_stop.wait(WS_HEARTBEAT_INTERVAL)
+
+        t = threading.Thread(target=sender, daemon=True)
+        t.start()
+
+        try:
+            # Receiver: blocks on ws.recv(), handles commands
+            while running_flag[0]:
+                try:
+                    raw = ws.recv(timeout=2)
+                except TimeoutError:
+                    continue
+
+                try:
+                    msg = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+
+                if msg.get("type") == "command":
+                    cmd_id = msg.get("id", "")
+                    # ACK
+                    ws.send(json.dumps({"type": "command_ack", "id": cmd_id}))
+                    # Execute
+                    result_status, result_msg = execute_command(msg, silicon_name)
+                    ws.send(json.dumps({
+                        "type": "command_result",
+                        "id": cmd_id,
+                        "status": result_status,
+                        "message": result_msg,
+                    }))
+                    print(f"[glass-agent] {msg.get('command')} → {result_status}: {result_msg}", flush=True)
+        finally:
+            sender_stop.set()
+            t.join(timeout=3)
+
+
+# ── REST polling mode (fallback) ─────────────────────────────
+
+
+def run_poll_loop(server_url, api_key, silicon_name, silicon_dir, log_tailer, running_flag, max_cycles=0):
+    """REST polling fallback. Runs for max_cycles (0 = unlimited)."""
+    cycle = 0
+    while running_flag[0]:
+        try:
+            status = detect_status(silicon_dir)
+            api_request(server_url, "/control/api/heartbeat/", api_key, method="POST", data={"status": status})
+
+            resp = api_request(server_url, "/control/api/commands/pending/", api_key)
+            commands = resp.get("commands", []) if isinstance(resp, dict) else []
+            for cmd in commands:
+                cmd_id = cmd.get("id")
+                if not cmd_id:
+                    continue
+                api_request(server_url, f"/control/api/commands/{cmd_id}/ack/", api_key, method="POST")
+                result_status, result_msg = execute_command(cmd, silicon_name)
+                api_request(server_url, f"/control/api/commands/{cmd_id}/complete/", api_key, method="POST", data={
+                    "status": result_status, "message": result_msg,
+                })
+                print(f"[glass-agent] {cmd.get('command')} → {result_status}: {result_msg}", flush=True)
+
+            new_lines = log_tailer.read_new()
+            if new_lines:
+                api_request(server_url, "/control/api/logs/", api_key, method="POST", data={"lines": new_lines})
+
+        except Exception as e:
+            print(f"[glass-agent] Poll error: {e}", flush=True)
+
+        cycle += 1
+        if max_cycles and cycle >= max_cycles:
+            return
+
+        for _ in range(POLL_INTERVAL):
+            if not running_flag[0]:
+                return
+            time.sleep(1)
+
+
+# ── Main ─────────────────────────────────────────────────────
 
 
 def main():
@@ -185,65 +291,38 @@ def main():
     silicon_name = get_silicon_name(silicon_dir)
     log_tailer = LogTailer(silicon_dir / ".silicon.log")
     agent_pid_file = silicon_dir / ".glass_agent.pid"
-
-    # Write PID
     agent_pid_file.write_text(str(os.getpid()))
 
-    # Clean shutdown
-    running = True
+    running = [True]  # mutable for threads
 
     def handle_signal(signum, frame):
-        nonlocal running
-        running = False
+        running[0] = False
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
     print(f"[glass-agent] Started for '{silicon_name}' → {server_url}", flush=True)
 
-    while running:
-        try:
-            # 1. Heartbeat
-            status = detect_status(silicon_dir)
-            api_request(server_url, "/control/api/heartbeat/", api_key, method="POST", data={
-                "status": status,
-            })
+    # Try WebSocket, fall back to REST
+    ws_url = build_ws_url(server_url)
+    ws_available = False
+    try:
+        import websockets  # noqa: F401
+        ws_available = ws_url is not None
+    except ImportError:
+        print("[glass-agent] websockets not installed, using REST polling only.", flush=True)
 
-            # 2. Check for pending commands
-            resp = api_request(server_url, "/control/api/commands/pending/", api_key)
-            commands = resp.get("commands", []) if isinstance(resp, dict) else []
-            for cmd in commands:
-                cmd_id = cmd.get("id")
-                if not cmd_id:
-                    continue
-                # ACK
-                api_request(server_url, f"/control/api/commands/{cmd_id}/ack/", api_key, method="POST")
-                # Execute
-                result_status, result_msg = execute_command(cmd, silicon_name)
-                # Complete
-                api_request(server_url, f"/control/api/commands/{cmd_id}/complete/", api_key, method="POST", data={
-                    "status": result_status,
-                    "message": result_msg,
-                })
-                print(f"[glass-agent] {cmd.get('command')} → {result_status}: {result_msg}", flush=True)
+    while running[0]:
+        if ws_available:
+            try:
+                run_websocket_loop(ws_url, api_key, silicon_name, silicon_dir, log_tailer, running)
+            except Exception as e:
+                if running[0]:
+                    print(f"[glass-agent] WS disconnected: {e}. Falling back to REST.", flush=True)
+                    run_poll_loop(server_url, api_key, silicon_name, silicon_dir, log_tailer, running, max_cycles=REST_FALLBACK_CYCLES)
+        else:
+            run_poll_loop(server_url, api_key, silicon_name, silicon_dir, log_tailer, running)
 
-            # 3. Stream logs
-            new_lines = log_tailer.read_new()
-            if new_lines:
-                api_request(server_url, "/control/api/logs/", api_key, method="POST", data={
-                    "lines": new_lines,
-                })
-
-        except Exception as e:
-            print(f"[glass-agent] Error: {e}", flush=True)
-
-        # Sleep in small increments so signal handling is responsive
-        for _ in range(POLL_INTERVAL):
-            if not running:
-                break
-            time.sleep(1)
-
-    # Cleanup
     try:
         agent_pid_file.unlink(missing_ok=True)
     except Exception:
