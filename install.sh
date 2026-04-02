@@ -1311,6 +1311,64 @@ _silicon_watchdog_loop() {
     done
 }
 
+_start_glass_agent() {
+    local path="$1"
+    local agent_pid_file="$path/.glass_agent.pid"
+    local agent_log="$path/.glass_agent.log"
+
+    # Only start if .glass.json exists
+    [ -f "$path/.glass.json" ] || return 0
+
+    # Check if already running
+    if [ -f "$agent_pid_file" ]; then
+        local old_pid
+        old_pid=$(cat "$agent_pid_file" 2>/dev/null)
+        if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+            return 0
+        fi
+    fi
+
+    # Start glass agent
+    "$PYTHON_CMD" -u "$path/glass_agent.py" >> "$agent_log" 2>&1 &
+    local agent_pid=$!
+    disown "$agent_pid" 2>/dev/null
+    echo "$agent_pid" > "$agent_pid_file"
+    info "Glass agent started (PID $agent_pid)"
+}
+
+_stop_glass_agent() {
+    local path="$1"
+    local agent_pid_file="$path/.glass_agent.pid"
+
+    if [ -f "$agent_pid_file" ]; then
+        local pid
+        pid=$(cat "$agent_pid_file" 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null
+            sleep 1
+            kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+            info "Glass agent stopped"
+        fi
+        rm -f "$agent_pid_file"
+    fi
+}
+
+_glass_agent_status() {
+    local path="$1"
+    local agent_pid_file="$path/.glass_agent.pid"
+
+    if [ -f "$agent_pid_file" ]; then
+        local pid
+        pid=$(cat "$agent_pid_file" 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            echo "running"
+            return 0
+        fi
+    fi
+    echo "stopped"
+    return 1
+}
+
 cmd_start() {
     local target="$1"
     local inst
@@ -1327,6 +1385,8 @@ cmd_start() {
         local pid
         pid=$(get_pid "$pid_file")
         warn "'$name' is already running (PID $pid)"
+        # Still ensure agent is running
+        _start_glass_agent "$path"
         return
     fi
 
@@ -1351,12 +1411,24 @@ cmd_start() {
         error "'$name' failed to start. Check logs: $path/.silicon.log"
         rm -f "$pid_file"
     fi
+
+    # Start glass agent for remote control
+    _start_glass_agent "$path"
 }
 
 cmd_stop() {
+    local full_stop=false
     local target="$1"
-    local inst
 
+    # Check for --full flag
+    if [ "$target" = "--full" ]; then
+        full_stop=true
+        target="$2"
+    elif [ "$2" = "--full" ] || [ "${ARG3:-}" = "--full" ]; then
+        full_stop=true
+    fi
+
+    local inst
     if [ -n "$target" ]; then
         inst=$(find_installation "$target") || { error "Silicon '$target' not found"; exit 1; }
     else
@@ -1370,6 +1442,9 @@ cmd_stop() {
         # Still clean up any floaters
         _kill_floaters "$path" ""
         rm -f "$pid_file" "$path/.silicon.stop"
+        if [ "$full_stop" = true ]; then
+            _stop_glass_agent "$path"
+        fi
         return
     fi
 
@@ -1401,6 +1476,12 @@ cmd_stop() {
 
     rm -f "$pid_file" "$path/.silicon.stop"
     success "'$name' stopped"
+
+    if [ "$full_stop" = true ]; then
+        _stop_glass_agent "$path"
+    else
+        info "Glass agent still running (use --full to stop it too)."
+    fi
 }
 
 cmd_restart() {
@@ -1408,6 +1489,49 @@ cmd_restart() {
     cmd_stop "$target"
     sleep 1
     cmd_start "$target"
+}
+
+cmd_agent() {
+    local subcmd="$1"
+    local target="$2"
+    local inst
+
+    if [ -z "$subcmd" ]; then
+        error "Usage: silicon agent <start|stop|status> [name]"
+        exit 1
+    fi
+
+    if [ -n "$target" ]; then
+        inst=$(find_installation "$target") || { error "Silicon '$target' not found"; exit 1; }
+    else
+        inst=$(find_installation) || inst=$(pick_installation)
+    fi
+
+    IFS='|' read -r idx name path pid_file <<< "$inst"
+
+    case "$subcmd" in
+        start)
+            _start_glass_agent "$path"
+            ;;
+        stop)
+            _stop_glass_agent "$path"
+            ;;
+        status)
+            local status
+            status=$(_glass_agent_status "$path")
+            if [ "$status" = "running" ]; then
+                local pid
+                pid=$(cat "$path/.glass_agent.pid" 2>/dev/null)
+                printf "${GREEN}●${RESET} Glass agent running (PID %s)\n" "$pid"
+            else
+                printf "${DIM}○${RESET} Glass agent stopped\n"
+            fi
+            ;;
+        *)
+            error "Unknown agent command: $subcmd. Use start, stop, or status."
+            exit 1
+            ;;
+    esac
 }
 
 cmd_status() {
@@ -2011,8 +2135,10 @@ cmd_help() {
     printf "  silicon new                 Create a new Silicon (same as install)\n"
     printf "  silicon new .               Hydrate current folder into a runnable silicon\n"
     printf "  silicon start [name]        Start a silicon instance (with auto-restart)\n"
-    printf "  silicon stop [name]         Stop a running instance\n"
+    printf "  silicon stop [name]         Stop a running instance (agent stays alive)\n"
+    printf "  silicon stop --full [name]  Stop instance and glass agent\n"
     printf "  silicon restart [name]      Restart a silicon instance\n"
+    printf "  silicon agent <start|stop|status> [name]  Manage glass agent\n"
     printf "  silicon status [name]       Show instance status\n"
     printf "  silicon browser [name]      Open headed browser for login\n"
     printf "  silicon debug [name]        Attach to running instance (live logs)\n"
@@ -2033,7 +2159,7 @@ cmd_help() {
 
 suggest_command() {
     local input="$1"
-    local commands="start stop restart status browser debug attach pull push update list install new help script"
+    local commands="start stop restart status browser debug attach pull push update list install new help script agent"
     local best_match=""
     local best_score=999
 
@@ -2085,7 +2211,7 @@ ARG3="${3:-}"
 
 case "$CMD" in
     start)   cmd_start "$ARG" ;;
-    stop)    cmd_stop "$ARG" ;;
+    stop)    cmd_stop "$ARG" "$ARG3" ;;
     restart) cmd_restart "$ARG" ;;
     status)  cmd_status "$ARG" ;;
     browser) cmd_browser "$ARG" ;;
@@ -2095,6 +2221,7 @@ case "$CMD" in
     push)    cmd_push "$ARG" "$ARG3" ;;
     update)  cmd_update_instance "$ARG" ;;
     list|ls) cmd_list ;;
+    agent)   cmd_agent "$ARG" "$ARG3" ;;
     script)
         case "$ARG" in
             update) cmd_update_script ;;
