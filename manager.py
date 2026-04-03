@@ -235,8 +235,10 @@ def claude_code(text, carbon_id, on_tools=None):
         if rc != 0 and "no" in error_msg.lower() and "found" in error_msg.lower() and session_id in error_msg:
             print(f"  [{tag}] {error_msg} — starting fresh session...", flush=True)
             new_session(carbon_id)
-            notify_msg = "Manager session not found – send a message to start a new one."
-            return f'{{"tools": [{{"tool": "reply", "message": "{notify_msg}"}}, {{"tool": "do_nothing"}}]}}', None, []
+            # Send reply directly — don't go through tool pipeline (avoids retry loop)
+            from core.telegram import reply_user
+            reply_user("Manager session not found – send a message to start a new one.", carbon_id)
+            return '{"tools": [{"tool": "do_nothing"}]}', None, []
     except subprocess.TimeoutExpired:
         return '{"tools": [{"tool": "reply", "message": "Manager timed out. Please try again."}, {"tool": "do_nothing"}]}', None, []
     except Exception:
