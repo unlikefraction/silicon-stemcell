@@ -11,8 +11,9 @@ import threading
 import time
 from pathlib import Path
 
-POLL_INTERVAL = 15
+POLL_INTERVAL = 10
 WS_HEARTBEAT_INTERVAL = 10
+WS_LOG_INTERVAL = 1  # check for new logs every second
 LOG_CHUNK_MAX = 50_000  # bytes
 REST_FALLBACK_CYCLES = 5  # poll cycles before retrying WS
 
@@ -102,34 +103,54 @@ def detect_status(silicon_dir):
 
 def execute_command(cmd, silicon_name):
     action = cmd.get("command", "")
+    silicon_dir = find_silicon_dir()
     try:
         if action == "start":
-            result = subprocess.run(
+            subprocess.Popen(
                 ["silicon", "start", silicon_name],
-                capture_output=True, text=True, timeout=30,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True,
             )
-            msg = result.stdout.strip() or result.stderr.strip() or "started"
-            return "done", msg
+            # Wait up to 30s for status to become "running"
+            for _ in range(30):
+                time.sleep(1)
+                if silicon_dir and detect_status(silicon_dir) == "running":
+                    return "done", "started"
+            return "done", "started (status unconfirmed)"
         elif action == "stop":
-            result = subprocess.run(
+            subprocess.Popen(
                 ["silicon", "stop", silicon_name],
-                capture_output=True, text=True, timeout=30,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True,
             )
-            msg = result.stdout.strip() or result.stderr.strip() or "stopped"
-            return "done", msg
+            # Wait up to 30s for status to become "stopped"
+            for _ in range(30):
+                time.sleep(1)
+                if silicon_dir and detect_status(silicon_dir) != "running":
+                    return "done", "stopped"
+            return "done", "stopped (status unconfirmed)"
         elif action == "restart":
-            subprocess.run(["silicon", "stop", silicon_name], capture_output=True, text=True, timeout=30)
-            time.sleep(1)
-            result = subprocess.run(
-                ["silicon", "start", silicon_name],
-                capture_output=True, text=True, timeout=30,
+            subprocess.Popen(
+                ["silicon", "stop", silicon_name],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True,
             )
-            msg = result.stdout.strip() or result.stderr.strip() or "restarted"
-            return "done", msg
+            for _ in range(15):
+                time.sleep(1)
+                if silicon_dir and detect_status(silicon_dir) != "running":
+                    break
+            subprocess.Popen(
+                ["silicon", "start", silicon_name],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            for _ in range(30):
+                time.sleep(1)
+                if silicon_dir and detect_status(silicon_dir) == "running":
+                    return "done", "restarted"
+            return "done", "restarted (status unconfirmed)"
         else:
             return "failed", f"unknown command: {action}"
-    except subprocess.TimeoutExpired:
-        return "failed", "command timed out"
     except FileNotFoundError:
         return "failed", "silicon CLI not found on PATH"
     except Exception as e:
@@ -182,23 +203,37 @@ def run_websocket_loop(ws_url, api_key, silicon_name, silicon_dir, log_tailer, r
 
         print(f"[glass-agent] WebSocket connected (live mode)", flush=True)
 
-        # Sender thread: heartbeats + logs
-        sender_stop = threading.Event()
+        # Background threads for heartbeats and logs
+        stop_event = threading.Event()
+        ws_lock = threading.Lock()
 
-        def sender():
-            while not sender_stop.is_set() and running_flag[0]:
+        def safe_send(data):
+            with ws_lock:
+                ws.send(data)
+
+        def heartbeat_sender():
+            while not stop_event.is_set() and running_flag[0]:
                 try:
                     status = detect_status(silicon_dir)
-                    ws.send(json.dumps({"type": "heartbeat", "status": status}))
-                    new_lines = log_tailer.read_new()
-                    if new_lines:
-                        ws.send(json.dumps({"type": "log", "lines": new_lines}))
+                    safe_send(json.dumps({"type": "heartbeat", "status": status}))
                 except Exception:
                     break
-                sender_stop.wait(WS_HEARTBEAT_INTERVAL)
+                stop_event.wait(WS_HEARTBEAT_INTERVAL)
 
-        t = threading.Thread(target=sender, daemon=True)
-        t.start()
+        def log_sender():
+            while not stop_event.is_set() and running_flag[0]:
+                try:
+                    new_lines = log_tailer.read_new()
+                    if new_lines:
+                        safe_send(json.dumps({"type": "log", "lines": new_lines}))
+                except Exception:
+                    break
+                stop_event.wait(WS_LOG_INTERVAL)
+
+        t_hb = threading.Thread(target=heartbeat_sender, daemon=True)
+        t_log = threading.Thread(target=log_sender, daemon=True)
+        t_hb.start()
+        t_log.start()
 
         try:
             # Receiver: blocks on ws.recv(), handles commands
@@ -216,10 +251,10 @@ def run_websocket_loop(ws_url, api_key, silicon_name, silicon_dir, log_tailer, r
                 if msg.get("type") == "command":
                     cmd_id = msg.get("id", "")
                     # ACK
-                    ws.send(json.dumps({"type": "command_ack", "id": cmd_id}))
+                    safe_send(json.dumps({"type": "command_ack", "id": cmd_id}))
                     # Execute
                     result_status, result_msg = execute_command(msg, silicon_name)
-                    ws.send(json.dumps({
+                    safe_send(json.dumps({
                         "type": "command_result",
                         "id": cmd_id,
                         "status": result_status,
@@ -227,8 +262,9 @@ def run_websocket_loop(ws_url, api_key, silicon_name, silicon_dir, log_tailer, r
                     }))
                     print(f"[glass-agent] {msg.get('command')} → {result_status}: {result_msg}", flush=True)
         finally:
-            sender_stop.set()
-            t.join(timeout=3)
+            stop_event.set()
+            t_hb.join(timeout=3)
+            t_log.join(timeout=3)
 
 
 # ── REST polling mode (fallback) ─────────────────────────────
@@ -237,24 +273,28 @@ def run_websocket_loop(ws_url, api_key, silicon_name, silicon_dir, log_tailer, r
 def run_poll_loop(server_url, api_key, silicon_name, silicon_dir, log_tailer, running_flag, max_cycles=0):
     """REST polling fallback. Runs for max_cycles (0 = unlimited)."""
     cycle = 0
+    seconds_in_cycle = 0
     while running_flag[0]:
         try:
-            status = detect_status(silicon_dir)
-            api_request(server_url, "/control/api/heartbeat/", api_key, method="POST", data={"status": status})
+            # Heartbeat + commands every POLL_INTERVAL seconds
+            if seconds_in_cycle == 0:
+                status = detect_status(silicon_dir)
+                api_request(server_url, "/control/api/heartbeat/", api_key, method="POST", data={"status": status})
 
-            resp = api_request(server_url, "/control/api/commands/pending/", api_key)
-            commands = resp.get("commands", []) if isinstance(resp, dict) else []
-            for cmd in commands:
-                cmd_id = cmd.get("id")
-                if not cmd_id:
-                    continue
-                api_request(server_url, f"/control/api/commands/{cmd_id}/ack/", api_key, method="POST")
-                result_status, result_msg = execute_command(cmd, silicon_name)
-                api_request(server_url, f"/control/api/commands/{cmd_id}/complete/", api_key, method="POST", data={
-                    "status": result_status, "message": result_msg,
-                })
-                print(f"[glass-agent] {cmd.get('command')} → {result_status}: {result_msg}", flush=True)
+                resp = api_request(server_url, "/control/api/commands/pending/", api_key)
+                commands = resp.get("commands", []) if isinstance(resp, dict) else []
+                for cmd in commands:
+                    cmd_id = cmd.get("id")
+                    if not cmd_id:
+                        continue
+                    api_request(server_url, f"/control/api/commands/{cmd_id}/ack/", api_key, method="POST")
+                    result_status, result_msg = execute_command(cmd, silicon_name)
+                    api_request(server_url, f"/control/api/commands/{cmd_id}/complete/", api_key, method="POST", data={
+                        "status": result_status, "message": result_msg,
+                    })
+                    print(f"[glass-agent] {cmd.get('command')} → {result_status}: {result_msg}", flush=True)
 
+            # Logs every 2 seconds
             new_lines = log_tailer.read_new()
             if new_lines:
                 api_request(server_url, "/control/api/logs/", api_key, method="POST", data={"lines": new_lines})
@@ -262,14 +302,16 @@ def run_poll_loop(server_url, api_key, silicon_name, silicon_dir, log_tailer, ru
         except Exception as e:
             print(f"[glass-agent] Poll error: {e}", flush=True)
 
-        cycle += 1
-        if max_cycles and cycle >= max_cycles:
-            return
-
-        for _ in range(POLL_INTERVAL):
-            if not running_flag[0]:
+        seconds_in_cycle += 2
+        if seconds_in_cycle >= POLL_INTERVAL:
+            seconds_in_cycle = 0
+            cycle += 1
+            if max_cycles and cycle >= max_cycles:
                 return
-            time.sleep(1)
+
+        if not running_flag[0]:
+            return
+        time.sleep(2)
 
 
 # ── Main ─────────────────────────────────────────────────────
