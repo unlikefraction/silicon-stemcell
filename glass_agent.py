@@ -17,7 +17,7 @@ WS_LOG_INTERVAL = 1  # check for new logs every second
 LOG_CHUNK_MAX = 50_000  # bytes
 REST_FALLBACK_CYCLES = 5  # poll cycles before retrying WS
 VERSION_CHECK_INTERVAL = 1800  # check for updates every 30 minutes
-UPSTREAM_VERSION_URL = "https://raw.githubusercontent.com/unlikefraction/silicon-stemcell/main/silicon.json"
+UPSTREAM_VERSION_URL = "https://raw.githubusercontent.com/unlikefraction/silicon-stemcell/main/silicon.info"
 
 # ── Config ───────────────────────────────────────────────────
 
@@ -86,10 +86,10 @@ def api_request(server_url, path, api_key, method="GET", data=None):
 
 
 def get_local_version(silicon_dir):
-    sj = silicon_dir / "silicon.json"
-    if sj.exists():
+    info = silicon_dir / "silicon.info"
+    if info.exists():
         try:
-            return json.loads(sj.read_text()).get("version", "")
+            return json.loads(info.read_text()).get("version", "")
         except Exception:
             pass
     return ""

@@ -45,6 +45,13 @@ IGNORE_PREFIXES = {
     "worker/outputs/",
 }
 
+# Files that are always replaced from upstream, but only when the entire
+# update succeeds without conflicts.  This prevents the local version tag
+# from advancing when the codebase is only partially updated.
+REPLACE_ON_SUCCESS = {
+    "silicon.info",
+}
+
 TEXT_EXTENSIONS = {
     ".json", ".md", ".py", ".ps1", ".sh", ".txt", ".toml", ".yaml", ".yml", ".gitignore"
 }
@@ -317,6 +324,8 @@ def update(source: Path, target: Path) -> int:
 
     git_available = shutil.which("git") is not None
 
+    deferred_replace: list[tuple[Path, bytes, Path]] = []
+
     for rel, upstream_path in sorted(upstream_files.items()):
         local_path = target / rel
         base_path = base_dir / rel
@@ -324,6 +333,12 @@ def update(source: Path, target: Path) -> int:
         upstream_bytes = read_bytes(upstream_path)
         local_bytes = read_bytes(local_path)
         base_bytes = read_bytes(base_path)
+
+        # Defer silicon.info-style files — replace only on full success
+        if rel in REPLACE_ON_SUCCESS:
+            deferred_replace.append((local_path, upstream_bytes, upstream_path))
+            base_writes.append((base_path, upstream_bytes, upstream_path))
+            continue
 
         if local_bytes is None:
             writes.append((local_path, upstream_bytes, upstream_path))
@@ -365,6 +380,11 @@ def update(source: Path, target: Path) -> int:
 
     for path, data, mode_source in base_writes:
         write_file(path, data, mode_source)
+
+    # Only replace deferred files (silicon.info) if no conflicts
+    if not preserved_local_conflicts:
+        for path, data, mode_source in deferred_replace:
+            write_file(path, data, mode_source)
 
     save_meta(target, source)
 
