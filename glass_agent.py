@@ -336,7 +336,7 @@ def run_websocket_loop(ws_url, api_key, silicon_name, silicon_dir, log_tailer, r
                 if msg.get("type") == "command":
                     cmd_id = msg.get("id", "")
                     # ACK
-                    safe_send(json.dumps({"type": "command_ack", "id": cmd_id}))
+                    safe_send(json.dumps({"type": "command_ack", "id": cmd_id, "command": msg.get("command", "")}))
                     # Execute
                     result_status, result_msg = execute_command(msg, silicon_name)
                     safe_send(json.dumps({
