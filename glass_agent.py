@@ -98,6 +98,18 @@ def detect_status(silicon_dir):
         return "crashed"
 
 
+def detect_backup_running(silicon_dir):
+    pid_file = silicon_dir / ".glass-push.pid"
+    if not pid_file.exists():
+        return False
+    try:
+        pid = int(pid_file.read_text().strip())
+        os.kill(pid, 0)
+        return True
+    except (ValueError, ProcessLookupError, PermissionError):
+        return False
+
+
 # ── Command execution ────────────────────────────────────────
 
 
@@ -111,46 +123,75 @@ def execute_command(cmd, silicon_name):
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
-            # Wait up to 30s for status to become "running"
             for _ in range(30):
                 time.sleep(1)
                 if silicon_dir and detect_status(silicon_dir) == "running":
                     return "done", "started"
             return "done", "started (status unconfirmed)"
+
         elif action == "stop":
             subprocess.Popen(
                 ["silicon", "stop", silicon_name],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
-            # Wait up to 30s for status to become "stopped"
             for _ in range(30):
                 time.sleep(1)
                 if silicon_dir and detect_status(silicon_dir) != "running":
                     return "done", "stopped"
             return "done", "stopped (status unconfirmed)"
-        elif action == "restart":
+
+        elif action == "backup_now":
+            result = subprocess.run(
+                ["silicon", "push", silicon_name, "now"],
+                capture_output=True, text=True, timeout=120,
+            )
+            msg = result.stdout.strip() or result.stderr.strip() or "backup complete"
+            return ("done" if result.returncode == 0 else "failed"), msg
+
+        elif action == "backup_on":
+            if detect_backup_running(silicon_dir):
+                return "done", "continuous backup already running"
             subprocess.Popen(
-                ["silicon", "stop", silicon_name],
+                ["silicon", "push", silicon_name],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
-            for _ in range(15):
+            # Wait a few seconds for the PID file to appear
+            for _ in range(10):
                 time.sleep(1)
-                if silicon_dir and detect_status(silicon_dir) != "running":
-                    break
-            subprocess.Popen(
-                ["silicon", "start", silicon_name],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                start_new_session=True,
+                if detect_backup_running(silicon_dir):
+                    return "done", "continuous backup started"
+            return "done", "continuous backup started (status unconfirmed)"
+
+        elif action == "backup_off":
+            result = subprocess.run(
+                ["silicon", "push", silicon_name, "stop"],
+                capture_output=True, text=True, timeout=15,
             )
-            for _ in range(30):
-                time.sleep(1)
-                if silicon_dir and detect_status(silicon_dir) == "running":
-                    return "done", "restarted"
-            return "done", "restarted (status unconfirmed)"
+            msg = result.stdout.strip() or result.stderr.strip() or "continuous backup stopped"
+            return "done", msg
+
+        elif action == "update":
+            if detect_status(silicon_dir) == "running":
+                return "failed", "bud must be stopped before updating"
+            result = subprocess.run(
+                ["silicon", "update", silicon_name],
+                capture_output=True, text=True, timeout=300,
+            )
+            output = result.stdout.strip()
+            err = result.stderr.strip()
+            if result.returncode == 0:
+                return "done", output or "updated successfully"
+            elif result.returncode == 2:
+                return "failed", "merge conflicts detected — no files were changed"
+            else:
+                return "failed", err or output or "update failed"
+
         else:
             return "failed", f"unknown command: {action}"
+    except subprocess.TimeoutExpired:
+        return "failed", "command timed out"
     except FileNotFoundError:
         return "failed", "silicon CLI not found on PATH"
     except Exception as e:
@@ -215,7 +256,8 @@ def run_websocket_loop(ws_url, api_key, silicon_name, silicon_dir, log_tailer, r
             while not stop_event.is_set() and running_flag[0]:
                 try:
                     status = detect_status(silicon_dir)
-                    safe_send(json.dumps({"type": "heartbeat", "status": status}))
+                    backup = detect_backup_running(silicon_dir)
+                    safe_send(json.dumps({"type": "heartbeat", "status": status, "backup_running": backup}))
                 except Exception:
                     break
                 stop_event.wait(WS_HEARTBEAT_INTERVAL)
@@ -257,6 +299,7 @@ def run_websocket_loop(ws_url, api_key, silicon_name, silicon_dir, log_tailer, r
                     safe_send(json.dumps({
                         "type": "command_result",
                         "id": cmd_id,
+                        "command": msg.get("command", ""),
                         "status": result_status,
                         "message": result_msg,
                     }))
@@ -279,7 +322,8 @@ def run_poll_loop(server_url, api_key, silicon_name, silicon_dir, log_tailer, ru
             # Heartbeat + commands every POLL_INTERVAL seconds
             if seconds_in_cycle == 0:
                 status = detect_status(silicon_dir)
-                api_request(server_url, "/control/api/heartbeat/", api_key, method="POST", data={"status": status})
+                backup = detect_backup_running(silicon_dir)
+                api_request(server_url, "/control/api/heartbeat/", api_key, method="POST", data={"status": status, "backup_running": backup})
 
                 resp = api_request(server_url, "/control/api/commands/pending/", api_key)
                 commands = resp.get("commands", []) if isinstance(resp, dict) else []
