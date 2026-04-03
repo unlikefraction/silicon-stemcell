@@ -411,8 +411,10 @@ def run_event_loop_tick():
 
 
 def _make_mid_stream_handler(carbon_id):
-    """Create a callback that executes tool JSON found in intermediate assistant texts."""
+    """Create a callback that executes tool JSON found in intermediate assistant texts.
+    Returns list of tool specs that executed successfully (for dedup)."""
     def on_tools(tools_list):
+        succeeded = []
         for tool_spec in tools_list:
             tool_name = tool_spec.get("tool", "")
             if tool_name == "do_nothing":
@@ -423,6 +425,9 @@ def _make_mid_stream_handler(carbon_id):
             result = execute_single_tool(tool_spec, carbon_id)
             if result:
                 log(f"[Silicon] Mid-stream: {result}")
+                if "Error" not in result:
+                    succeeded.append(tool_spec)
+        return succeeded
     return on_tools
 
 

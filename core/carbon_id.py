@@ -37,6 +37,9 @@ def change_carbon_id(old_id, new_id):
     contacts = contacts_data.get("contacts", {})
 
     if old_id not in contacts:
+        # Idempotent: if old_id is gone but new_id exists with matching data, treat as already done
+        if new_id in contacts and contacts[new_id].get("carbon_id") == new_id:
+            return f"Done. carbon_id changed from '{old_id}' to '{new_id}' successfully."
         return f"Error: carbon_id '{old_id}' not found in contacts."
 
     if contacts[old_id].get("contact_type") == "silicon":

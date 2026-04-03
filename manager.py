@@ -186,8 +186,9 @@ def _run_streaming(cmd, input_text, tag, timeout=120, on_tools=None):
                             tools_data = parse_manager_output(txt)
                             if tools_data and "tools" in tools_data:
                                 tools_list = tools_data["tools"]
-                                on_tools(tools_list)
-                                executed_tools.extend(tools_list)
+                                succeeded = on_tools(tools_list)
+                                if succeeded:
+                                    executed_tools.extend(succeeded)
 
     stderr = proc.stderr.read()
     rc = proc.wait()
@@ -285,9 +286,9 @@ def claude_code(text, carbon_id, on_tools=None):
 
 
 def parse_manager_output(output):
-    """Extract the tools JSON from manager's text output.
-    The manager outputs a JSON block like: {"tools": [...]}
-    This may be surrounded by other text or markdown code blocks."""
+    """Extract ALL tools JSON blocks from manager's text output.
+    The manager may output one or more JSON blocks like: {"tools": [...]}
+    Returns a merged {"tools": [...]} with all tools from all blocks, or None."""
 
     print(f"[DEBUG] Raw manager output:\n{output}\n", flush=True)
 
@@ -298,8 +299,9 @@ def parse_manager_output(output):
     cleaned = re.sub(r'```(?:json)?\s*', '', output)
     cleaned = re.sub(r'```', '', cleaned)
 
-    # Try to find a JSON object with "tools" key
-    # Look for the outermost { ... } that contains "tools"
+    all_tools = []
+
+    # Find ALL JSON objects with "tools" key
     for text in [cleaned, output]:
         brace_depth = 0
         start = -1
@@ -315,18 +317,26 @@ def parse_manager_output(output):
                     try:
                         parsed = json.loads(candidate)
                         if "tools" in parsed:
-                            return parsed
+                            all_tools.extend(parsed["tools"])
                     except (json.JSONDecodeError, ValueError):
                         pass
                     start = -1
 
-    # Fallback: try the whole output as JSON
-    for text in [cleaned, output]:
-        try:
-            parsed = json.loads(text.strip())
-            if "tools" in parsed:
-                return parsed
-        except (json.JSONDecodeError, ValueError):
-            pass
+        # If we found tools in the cleaned version, don't re-scan the raw output
+        if all_tools:
+            break
 
+    # Fallback: try the whole output as JSON
+    if not all_tools:
+        for text in [cleaned, output]:
+            try:
+                parsed = json.loads(text.strip())
+                if "tools" in parsed:
+                    all_tools.extend(parsed["tools"])
+                    break
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+    if all_tools:
+        return {"tools": all_tools}
     return None
