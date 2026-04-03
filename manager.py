@@ -154,6 +154,8 @@ def _run_streaming(cmd, input_text, tag, timeout=120, on_tools=None):
                 rate_limit_msg = line
             continue
 
+        # Dump every event for debugging
+        print(f"  [{tag}] event: {json.dumps(event)[:400]}", flush=True)
         _display_stream_event(event, tag)
 
         etype = event.get("type", "")
