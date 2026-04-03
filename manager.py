@@ -124,6 +124,8 @@ def _run_streaming(cmd, input_text, tag, timeout=120, on_tools=None):
 
     result_text = ""
     rate_limit_msg = None
+    result_error_subtype = ""  # set if result event has is_error=true
+    result_error_msg = ""      # first entry from errors array
     all_texts = []  # fallback if no result event
     raw_lines = []  # collect all raw output for debugging
     executed_tools = []  # tool specs already executed mid-stream
@@ -154,23 +156,21 @@ def _run_streaming(cmd, input_text, tag, timeout=120, on_tools=None):
                 rate_limit_msg = line
             continue
 
-        # Dump every event for debugging
-        print(f"  [{tag}] event: {json.dumps(event)[:400]}", flush=True)
         _display_stream_event(event, tag)
 
         etype = event.get("type", "")
 
         if etype == "result":
             result_text = event.get("result", "")
-            # Also check error field for messages like "No conversation found"
-            error_text = event.get("error", "")
-            if error_text and not result_text:
-                result_text = error_text
-            if not result_text:
-                # Dump the full event so we can see what's in it
-                print(f"  [{tag}] result event: {json.dumps(event)[:300]}", flush=True)
             if result_text and _is_rate_limit(result_text):
                 rate_limit_msg = result_text
+            # Track errors — errors array has the actual messages
+            if event.get("is_error"):
+                result_error_subtype = event.get("subtype", "")
+                errors = event.get("errors", [])
+                if errors:
+                    result_error_msg = errors[0]
+                    print(f"  [{tag}] error: {result_error_msg}", flush=True)
 
         elif etype == "assistant":
             for block in event.get("message", {}).get("content", []):
@@ -205,7 +205,7 @@ def _run_streaming(cmd, input_text, tag, timeout=120, on_tools=None):
     if not result_text and all_texts:
         result_text = all_texts[-1]
 
-    return result_text, rate_limit_msg, rc, executed_tools, stderr.strip() if stderr else ""
+    return result_text, rate_limit_msg, rc, executed_tools, stderr.strip() if stderr else "", result_error_subtype, result_error_msg
 
 
 def claude_code(text, carbon_id, on_tools=None):
@@ -228,13 +228,12 @@ def claude_code(text, carbon_id, on_tools=None):
     ]
 
     try:
-        result_text, rate_limit, rc, executed_tools, stderr_text = _run_streaming(cmd, text, tag, on_tools=on_tools)
+        result_text, rate_limit, rc, executed_tools, stderr_text, error_subtype, error_msg = _run_streaming(cmd, text, tag, on_tools=on_tools)
         if rc == 0 and result_text.strip():
             return result_text.strip(), rate_limit, executed_tools
-        # Session not found — check stderr or result for the specific message
-        check_text = f"{stderr_text} {result_text}".lower()
-        if rc != 0 and "no" in check_text and "found" in check_text and session_id.lower() in check_text:
-            print(f"  [{tag}] session {session_id} not found, starting fresh...", flush=True)
+        # Session not found — check the exact error message
+        if rc != 0 and "no" in error_msg.lower() and "found" in error_msg.lower() and session_id in error_msg:
+            print(f"  [{tag}] {error_msg} — starting fresh session...", flush=True)
             new_session(carbon_id)
             notify_msg = "Manager session not found – send a message to start a new one."
             return f'{{"tools": [{{"tool": "reply", "message": "{notify_msg}"}}, {{"tool": "do_nothing"}}]}}', None, []
