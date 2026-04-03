@@ -974,10 +974,10 @@ else:
     silicon = {}
 
 silicon.setdefault("name", "Silicon")
-silicon.setdefault("version", "1.0")
 silicon.setdefault("run", "python main.py")
-silicon.setdefault("workers", {"terminal": ["chatgpt", "claude"]})
+silicon.setdefault("workers", {"terminal": ["claude", "chatgpt"]})
 silicon.setdefault("address", "$instance_name")
+silicon.pop("version", None)
 silicon_path.write_text(json.dumps(silicon, indent=4) + "\\n")
 
 env_path = dst / "env.py"
@@ -1047,7 +1047,7 @@ PY
         fi
 
         # ── Terminal worker preference (codex detection) ──
-        local terminal_workers='["chatgpt", "claude"]'
+        local terminal_workers='["claude", "chatgpt"]'
         if command -v codex &>/dev/null; then
             echo ""
             info "Detected that codex is installed."
@@ -1079,7 +1079,7 @@ env_path = pathlib.Path("$abs_target/env.py")
 text = env_path.read_text()
 
 def upsert(text, key, value):
-    pattern = rf'^{key}\\s*=\\s*["\\\'].*["\\\']\\s*$'
+    pattern = rf'^{key}\s*=\s*["\x27].*["\x27]\s*$'
     replacement = f'{key} = "{value}"'
     if re.search(pattern, text, re.M):
         return re.sub(pattern, replacement, text, flags=re.M)
@@ -1743,9 +1743,9 @@ else:
     silicon = {}
 
 silicon.setdefault("name", "Silicon")
-silicon.setdefault("version", "1.0")
 silicon.setdefault("run", "python main.py")
-silicon.setdefault("workers", {"terminal": ["chatgpt", "claude"]})
+silicon.setdefault("workers", {"terminal": ["claude", "chatgpt"]})
+silicon.pop("version", None)
 silicon["address"] = "$username"
 silicon["glass"] = {
     "server_url": "$GLASS_SERVER_URL",
