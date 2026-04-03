@@ -197,7 +197,7 @@ def _run_streaming(cmd, input_text, tag, timeout=120, on_tools=None):
     if not result_text and all_texts:
         result_text = all_texts[-1]
 
-    return result_text, rate_limit_msg, rc, executed_tools
+    return result_text, rate_limit_msg, rc, executed_tools, stderr.strip() if stderr else ""
 
 
 def claude_code(text, carbon_id, on_tools=None):
@@ -220,16 +220,23 @@ def claude_code(text, carbon_id, on_tools=None):
     ]
 
     try:
-        result_text, rate_limit, rc, executed_tools = _run_streaming(cmd, text, tag, on_tools=on_tools)
+        result_text, rate_limit, rc, executed_tools, stderr_text = _run_streaming(cmd, text, tag, on_tools=on_tools)
         if rc == 0 and result_text.strip():
             return result_text.strip(), rate_limit, executed_tools
+        # Session not found — check stderr for the specific message
+        if rc != 0 and "no" in stderr_text.lower() and "found" in stderr_text.lower() and session_id in stderr_text:
+            print(f"  [{tag}] session {session_id} not found, starting fresh...", flush=True)
+            new_session(carbon_id)
+            notify_msg = "Manager session not found – send a message to start a new one."
+            return f'{{"tools": [{{"tool": "reply", "message": "{notify_msg}"}}, {{"tool": "do_nothing"}}]}}', None, []
     except subprocess.TimeoutExpired:
         return '{"tools": [{"tool": "reply", "message": "Manager timed out. Please try again."}, {"tool": "do_nothing"}]}', None, []
     except Exception:
         pass
 
-    # Fallback: --resume without streaming (plain text mode, no mid-stream execution)
+    # Fallback: plain text mode with current session
     print(f"  [{tag}] retrying without stream-json...", flush=True)
+    session_id = _get_session_id(carbon_id)  # re-read in case new_session was called above
     cmd_fallback = [
         CLAUDE_CMD, "-p",
         "--resume", session_id,
