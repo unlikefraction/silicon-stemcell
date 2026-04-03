@@ -16,6 +16,8 @@ WS_HEARTBEAT_INTERVAL = 10
 WS_LOG_INTERVAL = 1  # check for new logs every second
 LOG_CHUNK_MAX = 50_000  # bytes
 REST_FALLBACK_CYCLES = 5  # poll cycles before retrying WS
+VERSION_CHECK_INTERVAL = 1800  # check for updates every 30 minutes
+UPSTREAM_VERSION_URL = "https://raw.githubusercontent.com/unlikefraction/silicon-stemcell/main/silicon.json"
 
 # ── Config ───────────────────────────────────────────────────
 
@@ -78,6 +80,40 @@ def api_request(server_url, path, api_key, method="GET", data=None):
             return {"error": str(e)}
     except Exception as e:
         return {"error": str(e)}
+
+
+# ── Version checking ─────────────────────────────────────────
+
+
+def get_local_version(silicon_dir):
+    sj = silicon_dir / "silicon.json"
+    if sj.exists():
+        try:
+            return json.loads(sj.read_text()).get("version", "")
+        except Exception:
+            pass
+    return ""
+
+
+_cached_latest_version = ""
+_last_version_check = 0
+
+
+def get_latest_version():
+    global _cached_latest_version, _last_version_check
+    now = time.time()
+    if now - _last_version_check < VERSION_CHECK_INTERVAL and _cached_latest_version:
+        return _cached_latest_version
+    try:
+        import urllib.request
+        req = urllib.request.Request(UPSTREAM_VERSION_URL, headers={"User-Agent": "glass-agent"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+            _cached_latest_version = data.get("version", "")
+            _last_version_check = now
+    except Exception:
+        pass
+    return _cached_latest_version
 
 
 # ── Status detection ─────────────────────────────────────────
@@ -257,7 +293,14 @@ def run_websocket_loop(ws_url, api_key, silicon_name, silicon_dir, log_tailer, r
                 try:
                     status = detect_status(silicon_dir)
                     backup = detect_backup_running(silicon_dir)
-                    safe_send(json.dumps({"type": "heartbeat", "status": status, "backup_running": backup}))
+                    cur_ver = get_local_version(silicon_dir)
+                    lat_ver = get_latest_version()
+                    safe_send(json.dumps({
+                        "type": "heartbeat", "status": status,
+                        "backup_running": backup,
+                        "current_version": cur_ver,
+                        "latest_version": lat_ver,
+                    }))
                 except Exception:
                     break
                 stop_event.wait(WS_HEARTBEAT_INTERVAL)
@@ -323,7 +366,12 @@ def run_poll_loop(server_url, api_key, silicon_name, silicon_dir, log_tailer, ru
             if seconds_in_cycle == 0:
                 status = detect_status(silicon_dir)
                 backup = detect_backup_running(silicon_dir)
-                api_request(server_url, "/control/api/heartbeat/", api_key, method="POST", data={"status": status, "backup_running": backup})
+                cur_ver = get_local_version(silicon_dir)
+                lat_ver = get_latest_version()
+                api_request(server_url, "/control/api/heartbeat/", api_key, method="POST", data={
+                    "status": status, "backup_running": backup,
+                    "current_version": cur_ver, "latest_version": lat_ver,
+                })
 
                 resp = api_request(server_url, "/control/api/commands/pending/", api_key)
                 commands = resp.get("commands", []) if isinstance(resp, dict) else []
