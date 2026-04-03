@@ -158,9 +158,15 @@ def _run_streaming(cmd, input_text, tag, timeout=120, on_tools=None):
 
         etype = event.get("type", "")
 
-        # Don't parse result — it duplicates the last assistant text
         if etype == "result":
             result_text = event.get("result", "")
+            # Also check error field for messages like "No conversation found"
+            error_text = event.get("error", "")
+            if error_text and not result_text:
+                result_text = error_text
+            if not result_text:
+                # Dump the full event so we can see what's in it
+                print(f"  [{tag}] result event: {json.dumps(event)[:300]}", flush=True)
             if result_text and _is_rate_limit(result_text):
                 rate_limit_msg = result_text
 
@@ -223,8 +229,9 @@ def claude_code(text, carbon_id, on_tools=None):
         result_text, rate_limit, rc, executed_tools, stderr_text = _run_streaming(cmd, text, tag, on_tools=on_tools)
         if rc == 0 and result_text.strip():
             return result_text.strip(), rate_limit, executed_tools
-        # Session not found — check stderr for the specific message
-        if rc != 0 and "no" in stderr_text.lower() and "found" in stderr_text.lower() and session_id in stderr_text:
+        # Session not found — check stderr or result for the specific message
+        check_text = f"{stderr_text} {result_text}".lower()
+        if rc != 0 and "no" in check_text and "found" in check_text and session_id.lower() in check_text:
             print(f"  [{tag}] session {session_id} not found, starting fresh...", flush=True)
             new_session(carbon_id)
             notify_msg = "Manager session not found – send a message to start a new one."
