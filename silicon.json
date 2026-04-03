@@ -1,9 +1,9 @@
 {
     "name": "Silicon",
     "address": "",
-    "version": "1.0",
+    "version": "1.1",
     "run": "python main.py",
     "workers": {
-        "terminal": ["chatgpt", "claude"]
+        "terminal": ["claude", "chatgpt"]
     }
 }
