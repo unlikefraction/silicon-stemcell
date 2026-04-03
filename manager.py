@@ -103,6 +103,8 @@ def _display_stream_event(event, tag):
 def _run_streaming(cmd, input_text, tag, timeout=120):
     """Run claude CLI with stream-json, show events on terminal.
     Returns (result_text, rate_limit_msg_or_None, returncode)."""
+    print(f"  [{tag}] launching: {' '.join(cmd[:6])}...", flush=True)
+
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
@@ -115,12 +117,13 @@ def _run_streaming(cmd, input_text, tag, timeout=120):
         try:
             proc.stdin.write(input_text)
         except BrokenPipeError:
-            pass
+            print(f"  [{tag}] stdin broken pipe", flush=True)
     proc.stdin.close()
 
     result_text = ""
     rate_limit_msg = None
     all_texts = []  # fallback if no result event
+    raw_lines = []  # collect all raw output for debugging
     deadline = time.time() + timeout
 
     while True:
@@ -133,6 +136,7 @@ def _run_streaming(cmd, input_text, tag, timeout=120):
         if not line:
             break
 
+        raw_lines.append(line.rstrip())
         line = line.strip()
         if not line:
             continue
@@ -140,6 +144,11 @@ def _run_streaming(cmd, input_text, tag, timeout=120):
         try:
             event = json.loads(line)
         except (json.JSONDecodeError, ValueError):
+            # Not JSON — could be plain text output
+            print(f"  [{tag}] (raw) {line[:200]}", flush=True)
+            all_texts.append(line)
+            if _is_rate_limit(line):
+                rate_limit_msg = line
             continue
 
         _display_stream_event(event, tag)
@@ -161,19 +170,22 @@ def _run_streaming(cmd, input_text, tag, timeout=120):
                             rate_limit_msg = txt
 
     stderr = proc.stderr.read()
-    proc.wait()
+    rc = proc.wait()
 
-    # Check stderr for rate limits too
-    if stderr and _is_rate_limit(stderr):
-        if not rate_limit_msg:
-            rate_limit_msg = stderr.strip()
-        print(f"  [{tag}] stderr: {stderr.strip()[:200]}", flush=True)
+    if stderr:
+        print(f"  [{tag}] stderr: {stderr.strip()[:300]}", flush=True)
+        if _is_rate_limit(stderr):
+            if not rate_limit_msg:
+                rate_limit_msg = stderr.strip()
+
+    if not result_text and not all_texts:
+        print(f"  [{tag}] empty output (rc={rc}, {len(raw_lines)} lines)", flush=True)
 
     # If no result event, fall back to last assistant text
     if not result_text and all_texts:
         result_text = all_texts[-1]
 
-    return result_text, rate_limit_msg, proc.returncode
+    return result_text, rate_limit_msg, rc
 
 
 def claude_code(text, carbon_id):
