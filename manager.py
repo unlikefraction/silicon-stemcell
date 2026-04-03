@@ -196,13 +196,14 @@ def claude_code(text, carbon_id):
     prompt_file = _write_prompt_file(carbon_id, system_prompt)
     tag = f"manager:{carbon_id}"
 
-    # Try resuming existing session first
+    # Stream with --resume
     cmd = [
         CLAUDE_CMD, "-p",
         "--resume", session_id,
         "--system-prompt-file", prompt_file,
         "--dangerously-skip-permissions",
         "--output-format=stream-json",
+        "--verbose",
     ]
 
     try:
@@ -210,22 +211,30 @@ def claude_code(text, carbon_id):
         if rc == 0 and result_text.strip():
             return result_text.strip(), rate_limit
     except subprocess.TimeoutExpired:
-        pass
+        return '{"tools": [{"tool": "reply", "message": "Manager timed out. Please try again."}, {"tool": "do_nothing"}]}', None
     except Exception:
         pass
 
-    # Fall back to starting with session-id (new session with that ID)
+    # Fallback: --resume without streaming (plain text mode)
+    print(f"  [{tag}] retrying without stream-json...", flush=True)
     cmd_fallback = [
         CLAUDE_CMD, "-p",
-        "--session-id", session_id,
+        "--resume", session_id,
         "--system-prompt-file", prompt_file,
         "--dangerously-skip-permissions",
-        "--output-format=stream-json",
     ]
 
     try:
-        result_text, rate_limit, rc = _run_streaming(cmd_fallback, text, tag)
-        return result_text.strip(), rate_limit
+        result = subprocess.run(
+            cmd_fallback,
+            input=text,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        output = result.stdout.strip()
+        rl = output if (output and _is_rate_limit(output)) else None
+        return output, rl
     except subprocess.TimeoutExpired:
         return '{"tools": [{"tool": "reply", "message": "Manager timed out. Please try again."}, {"tool": "do_nothing"}]}', None
     except Exception as e:
