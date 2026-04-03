@@ -233,9 +233,21 @@ def claude_code(text, carbon_id, on_tools=None):
             return result_text.strip(), rate_limit, executed_tools
         # Session not found — check the exact error message
         if rc != 0 and "no" in error_msg.lower() and "found" in error_msg.lower() and session_id in error_msg:
-            print(f"  [{tag}] {error_msg} — starting fresh session...", flush=True)
-            new_session(carbon_id)
-            # Send reply directly — don't go through tool pipeline (avoids retry loop)
+            print(f"  [{tag}] {error_msg} — creating new session...", flush=True)
+            new_sid = new_session(carbon_id)
+            # Use --session-id to actually create the session (--resume only looks for existing)
+            cmd_new = [
+                CLAUDE_CMD, "-p",
+                "--session-id", new_sid,
+                "--system-prompt-file", prompt_file,
+                "--dangerously-skip-permissions",
+                "--output-format=stream-json",
+                "--verbose",
+            ]
+            result_text, rate_limit, rc, executed_tools, stderr_text, error_subtype, error_msg = _run_streaming(cmd_new, text, tag, on_tools=on_tools)
+            if rc == 0 and result_text.strip():
+                return result_text.strip(), rate_limit, executed_tools
+            # If that also failed, give up gracefully
             from core.telegram import reply_user
             reply_user("Manager session not found – send a message to start a new one.", carbon_id)
             return '{"tools": [{"tool": "do_nothing"}]}', None, []
