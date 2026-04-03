@@ -100,9 +100,10 @@ def _display_stream_event(event, tag):
         print(" ".join(parts), flush=True)
 
 
-def _run_streaming(cmd, input_text, tag, timeout=120):
+def _run_streaming(cmd, input_text, tag, timeout=120, on_tools=None):
     """Run claude CLI with stream-json, show events on terminal.
-    Returns (result_text, rate_limit_msg_or_None, returncode)."""
+    on_tools(tools_list) is called for tool JSON found in intermediate assistant texts.
+    Returns (result_text, rate_limit_msg_or_None, returncode, executed_tools)."""
     print(f"  [{tag}] launching: {' '.join(cmd[:6])}...", flush=True)
 
     proc = subprocess.Popen(
@@ -111,6 +112,7 @@ def _run_streaming(cmd, input_text, tag, timeout=120):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        cwd=PROJECT_ROOT,
     )
 
     if input_text:
@@ -124,6 +126,7 @@ def _run_streaming(cmd, input_text, tag, timeout=120):
     rate_limit_msg = None
     all_texts = []  # fallback if no result event
     raw_lines = []  # collect all raw output for debugging
+    executed_tools = []  # tool specs already executed mid-stream
     deadline = time.time() + timeout
 
     while True:
@@ -155,6 +158,7 @@ def _run_streaming(cmd, input_text, tag, timeout=120):
 
         etype = event.get("type", "")
 
+        # Don't parse result — it duplicates the last assistant text
         if etype == "result":
             result_text = event.get("result", "")
             if result_text and _is_rate_limit(result_text):
@@ -168,6 +172,14 @@ def _run_streaming(cmd, input_text, tag, timeout=120):
                         all_texts.append(txt)
                         if _is_rate_limit(txt):
                             rate_limit_msg = txt
+
+                        # Try to parse as tool JSON and execute mid-stream
+                        if on_tools:
+                            tools_data = parse_manager_output(txt)
+                            if tools_data and "tools" in tools_data:
+                                tools_list = tools_data["tools"]
+                                on_tools(tools_list)
+                                executed_tools.extend(tools_list)
 
     stderr = proc.stderr.read()
     rc = proc.wait()
@@ -185,12 +197,13 @@ def _run_streaming(cmd, input_text, tag, timeout=120):
     if not result_text and all_texts:
         result_text = all_texts[-1]
 
-    return result_text, rate_limit_msg, rc
+    return result_text, rate_limit_msg, rc, executed_tools
 
 
-def claude_code(text, carbon_id):
+def claude_code(text, carbon_id, on_tools=None):
     """Invoke the Manager via claude CLI with streaming JSON.
-    Returns (raw_text_output, rate_limit_message_or_None)."""
+    on_tools(tools_list) is called for mid-stream tool JSON in assistant texts.
+    Returns (raw_text_output, rate_limit_message_or_None, executed_tools)."""
     session_id = _get_session_id(carbon_id)
     system_prompt = get_manager_prompt(carbon_id)
     prompt_file = _write_prompt_file(carbon_id, system_prompt)
@@ -207,15 +220,15 @@ def claude_code(text, carbon_id):
     ]
 
     try:
-        result_text, rate_limit, rc = _run_streaming(cmd, text, tag)
+        result_text, rate_limit, rc, executed_tools = _run_streaming(cmd, text, tag, on_tools=on_tools)
         if rc == 0 and result_text.strip():
-            return result_text.strip(), rate_limit
+            return result_text.strip(), rate_limit, executed_tools
     except subprocess.TimeoutExpired:
-        return '{"tools": [{"tool": "reply", "message": "Manager timed out. Please try again."}, {"tool": "do_nothing"}]}', None
+        return '{"tools": [{"tool": "reply", "message": "Manager timed out. Please try again."}, {"tool": "do_nothing"}]}', None, []
     except Exception:
         pass
 
-    # Fallback: --resume without streaming (plain text mode)
+    # Fallback: --resume without streaming (plain text mode, no mid-stream execution)
     print(f"  [{tag}] retrying without stream-json...", flush=True)
     cmd_fallback = [
         CLAUDE_CMD, "-p",
@@ -231,14 +244,15 @@ def claude_code(text, carbon_id):
             capture_output=True,
             text=True,
             timeout=120,
+            cwd=PROJECT_ROOT,
         )
         output = result.stdout.strip()
         rl = output if (output and _is_rate_limit(output)) else None
-        return output, rl
+        return output, rl, []
     except subprocess.TimeoutExpired:
-        return '{"tools": [{"tool": "reply", "message": "Manager timed out. Please try again."}, {"tool": "do_nothing"}]}', None
+        return '{"tools": [{"tool": "reply", "message": "Manager timed out. Please try again."}, {"tool": "do_nothing"}]}', None, []
     except Exception as e:
-        return f'{{"tools": [{{"tool": "reply", "message": "Manager error: {e}"}}, {{"tool": "do_nothing"}}]}}', None
+        return f'{{"tools": [{{"tool": "reply", "message": "Manager error: {e}"}}, {{"tool": "do_nothing"}}]}}', None, []
 
 
 def parse_manager_output(output):

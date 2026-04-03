@@ -410,6 +410,22 @@ def run_event_loop_tick():
     return merged
 
 
+def _make_mid_stream_handler(carbon_id):
+    """Create a callback that executes tool JSON found in intermediate assistant texts."""
+    def on_tools(tools_list):
+        for tool_spec in tools_list:
+            tool_name = tool_spec.get("tool", "")
+            if tool_name == "do_nothing":
+                continue
+            # Skip tools that need centralized handling
+            if tool_name in ("restart_silicon_service", "change_carbon_id"):
+                continue
+            result = execute_single_tool(tool_spec, carbon_id)
+            if result:
+                log(f"[Silicon] Mid-stream: {result}")
+    return on_tools
+
+
 def run_all_managers(context_by_carbon):
     """Run managers for all carbons that have context. Parallel invocation, centralized tool execution."""
     pending = dict(context_by_carbon)  # {carbon_id: text_to_send}
@@ -422,18 +438,22 @@ def run_all_managers(context_by_carbon):
         log(f"[Silicon] Manager round {iteration + 1} for {list(pending.keys())}...")
 
         # Invoke all managers in parallel
-        manager_outputs = {}  # {carbon_id: raw_text}
+        manager_outputs = {}       # {carbon_id: raw_text}
+        already_executed = {}      # {carbon_id: [tool_spec, ...]}
         with ThreadPoolExecutor(max_workers=max(len(pending), 1)) as executor:
             futures = {}
             for carbon_id, text in pending.items():
-                future = executor.submit(claude_code, text, carbon_id)
+                on_tools = _make_mid_stream_handler(carbon_id)
+                future = executor.submit(claude_code, text, carbon_id, on_tools=on_tools)
                 futures[future] = carbon_id
 
             for future in as_completed(futures):
                 carbon_id = futures[future]
                 try:
-                    output, _ = future.result()
+                    output, _, executed_tools = future.result()
                     manager_outputs[carbon_id] = output
+                    if executed_tools:
+                        already_executed[carbon_id] = executed_tools
                 except Exception as e:
                     manager_outputs[carbon_id] = f'{{"tools": [{{"tool": "reply", "message": "Manager error: {e}"}}, {{"tool": "do_nothing"}}]}}'
 
@@ -467,9 +487,18 @@ def run_all_managers(context_by_carbon):
                 log(f"[Silicon] Manager for {carbon_id} returned do_nothing.")
                 continue
 
+            # Dedup against tools already executed mid-stream
+            executed_keys = set()
+            if carbon_id in already_executed:
+                executed_keys = {json.dumps(t, sort_keys=True) for t in already_executed[carbon_id]}
+
             for tool_spec in tools_data["tools"]:
-                if tool_spec.get("tool") != "do_nothing":
-                    all_tools.append((carbon_id, tool_spec))
+                if tool_spec.get("tool") == "do_nothing":
+                    continue
+                if json.dumps(tool_spec, sort_keys=True) in executed_keys:
+                    log(f"[Silicon] Skipping (already mid-stream): {tool_spec.get('tool')}")
+                    continue
+                all_tools.append((carbon_id, tool_spec))
 
         # Execute all tools through centralized executor
         if all_tools:
