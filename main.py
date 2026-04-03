@@ -12,7 +12,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from config import EVENT_LOOP, LOOP_TICK
-from manager import claude_code, parse_manager_output, new_session
+from manager import claude_code, parse_manager_output, new_session, _is_rate_limit
 from core.telegram import reply_user, get_contacts
 from core.glass import ensure_known_silicon_contact
 from core.messages import send_manager_message
@@ -422,7 +422,7 @@ def run_all_managers(context_by_carbon):
         log(f"[Silicon] Manager round {iteration + 1} for {list(pending.keys())}...")
 
         # Invoke all managers in parallel
-        manager_outputs = {}
+        manager_outputs = {}  # {carbon_id: raw_text}
         with ThreadPoolExecutor(max_workers=max(len(pending), 1)) as executor:
             futures = {}
             for carbon_id, text in pending.items():
@@ -432,7 +432,8 @@ def run_all_managers(context_by_carbon):
             for future in as_completed(futures):
                 carbon_id = futures[future]
                 try:
-                    manager_outputs[carbon_id] = future.result()
+                    output, _ = future.result()
+                    manager_outputs[carbon_id] = output
                 except Exception as e:
                     manager_outputs[carbon_id] = f'{{"tools": [{{"tool": "reply", "message": "Manager error: {e}"}}, {{"tool": "do_nothing"}}]}}'
 
@@ -446,6 +447,12 @@ def run_all_managers(context_by_carbon):
             tools_data = parse_manager_output(output)
 
             if tools_data is None:
+                # Check if this is a rate limit message — notify user, don't retry
+                if output and _is_rate_limit(output):
+                    log(f"[Silicon] Rate limit for {carbon_id}: {output[:200]}")
+                    reply_user(output.strip(), carbon_id)
+                    continue
+
                 if not output or not output.strip():
                     error_msg = "Manager must output TOOL JSON. You returned empty output."
                 elif '"tools"' not in output and "'tools'" not in output:

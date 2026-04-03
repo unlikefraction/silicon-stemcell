@@ -2,6 +2,7 @@ import subprocess
 import os
 import json
 import re
+import time
 import uuid
 import platform
 import shutil
@@ -52,11 +53,136 @@ def _write_prompt_file(carbon_id, prompt):
     return prompt_file
 
 
+def _is_rate_limit(text):
+    """Check if text indicates an API rate limit."""
+    lower = text.lower()
+    return any(p in lower for p in [
+        "rate limit", "rate_limit", "usage limit",
+        "too many requests", "quota exceeded", "overloaded",
+    ])
+
+
+def _display_stream_event(event, tag):
+    """Print a stream-json event to terminal."""
+    t = event.get("type", "")
+
+    if t == "system" and event.get("subtype") == "init":
+        model = event.get("model", "")
+        sid = event.get("session_id", "")[:8]
+        print(f"  [{tag}] session {sid} | {model}", flush=True)
+
+    elif t == "assistant":
+        content = event.get("message", {}).get("content", [])
+        for block in content:
+            bt = block.get("type", "")
+            if bt == "text":
+                txt = block.get("text", "").strip()
+                if txt:
+                    preview = txt[:150].replace("\n", " ")
+                    if len(txt) > 150:
+                        preview += "…"
+                    print(f"  [{tag}] {preview}", flush=True)
+            elif bt == "tool_use":
+                name = block.get("name", "?")
+                print(f"  [{tag}] tool: {name}", flush=True)
+
+    elif t == "result":
+        cost = event.get("cost_usd")
+        duration = event.get("duration_ms")
+        subtype = event.get("subtype", "")
+        parts = [f"  [{tag}] done"]
+        if subtype and subtype != "success":
+            parts[0] += f" ({subtype})"
+        if cost is not None:
+            parts.append(f"${cost:.4f}")
+        if duration is not None:
+            parts.append(f"{duration / 1000:.1f}s")
+        print(" ".join(parts), flush=True)
+
+
+def _run_streaming(cmd, input_text, tag, timeout=120):
+    """Run claude CLI with stream-json, show events on terminal.
+    Returns (result_text, rate_limit_msg_or_None, returncode)."""
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    if input_text:
+        try:
+            proc.stdin.write(input_text)
+        except BrokenPipeError:
+            pass
+    proc.stdin.close()
+
+    result_text = ""
+    rate_limit_msg = None
+    all_texts = []  # fallback if no result event
+    deadline = time.time() + timeout
+
+    while True:
+        if time.time() > deadline:
+            proc.kill()
+            proc.wait()
+            raise subprocess.TimeoutExpired(cmd, timeout)
+
+        line = proc.stdout.readline()
+        if not line:
+            break
+
+        line = line.strip()
+        if not line:
+            continue
+
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+        _display_stream_event(event, tag)
+
+        etype = event.get("type", "")
+
+        if etype == "result":
+            result_text = event.get("result", "")
+            if result_text and _is_rate_limit(result_text):
+                rate_limit_msg = result_text
+
+        elif etype == "assistant":
+            for block in event.get("message", {}).get("content", []):
+                if block.get("type") == "text":
+                    txt = block.get("text", "").strip()
+                    if txt:
+                        all_texts.append(txt)
+                        if _is_rate_limit(txt):
+                            rate_limit_msg = txt
+
+    stderr = proc.stderr.read()
+    proc.wait()
+
+    # Check stderr for rate limits too
+    if stderr and _is_rate_limit(stderr):
+        if not rate_limit_msg:
+            rate_limit_msg = stderr.strip()
+        print(f"  [{tag}] stderr: {stderr.strip()[:200]}", flush=True)
+
+    # If no result event, fall back to last assistant text
+    if not result_text and all_texts:
+        result_text = all_texts[-1]
+
+    return result_text, rate_limit_msg, proc.returncode
+
+
 def claude_code(text, carbon_id):
-    """Invoke the Manager via claude CLI for a specific carbon. Returns the raw text output."""
+    """Invoke the Manager via claude CLI with streaming JSON.
+    Returns (raw_text_output, rate_limit_message_or_None)."""
     session_id = _get_session_id(carbon_id)
     system_prompt = get_manager_prompt(carbon_id)
     prompt_file = _write_prompt_file(carbon_id, system_prompt)
+    tag = f"manager:{carbon_id}"
 
     # Try resuming existing session first
     cmd = [
@@ -64,19 +190,16 @@ def claude_code(text, carbon_id):
         "--resume", session_id,
         "--system-prompt-file", prompt_file,
         "--dangerously-skip-permissions",
+        "--output-format=stream-json",
     ]
 
     try:
-        result = subprocess.run(
-            cmd,
-            input=text,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    except (subprocess.TimeoutExpired, Exception):
+        result_text, rate_limit, rc = _run_streaming(cmd, text, tag)
+        if rc == 0 and result_text.strip():
+            return result_text.strip(), rate_limit
+    except subprocess.TimeoutExpired:
+        pass
+    except Exception:
         pass
 
     # Fall back to starting with session-id (new session with that ID)
@@ -85,21 +208,16 @@ def claude_code(text, carbon_id):
         "--session-id", session_id,
         "--system-prompt-file", prompt_file,
         "--dangerously-skip-permissions",
+        "--output-format=stream-json",
     ]
 
     try:
-        result = subprocess.run(
-            cmd_fallback,
-            input=text,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        return result.stdout.strip()
+        result_text, rate_limit, rc = _run_streaming(cmd_fallback, text, tag)
+        return result_text.strip(), rate_limit
     except subprocess.TimeoutExpired:
-        return '{"tools": [{"tool": "reply", "message": "Manager timed out. Please try again."}, {"tool": "do_nothing"}]}'
+        return '{"tools": [{"tool": "reply", "message": "Manager timed out. Please try again."}, {"tool": "do_nothing"}]}', None
     except Exception as e:
-        return f'{{"tools": [{{"tool": "reply", "message": "Manager error: {e}"}}, {{"tool": "do_nothing"}}]}}'
+        return f'{{"tools": [{{"tool": "reply", "message": "Manager error: {e}"}}, {{"tool": "do_nothing"}}]}}', None
 
 
 def parse_manager_output(output):
