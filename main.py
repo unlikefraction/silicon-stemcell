@@ -476,6 +476,12 @@ def run_all_managers(context_by_carbon):
                     reply_user(output.strip(), carbon_id)
                     continue
 
+                # Manager timed out — feed the timeout message back directly
+                if output and output.startswith("SYSTEM:"):
+                    log(f"[Silicon] Manager timeout for {carbon_id}")
+                    pending[carbon_id] = output
+                    continue
+
                 if not output or not output.strip():
                     error_msg = "Manager must output TOOL JSON. You returned empty output."
                 elif '"tools"' not in output and "'tools'" not in output:

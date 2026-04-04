@@ -22,6 +22,8 @@ if IS_WINDOWS:
     if _claude_path:
         CLAUDE_CMD = _claude_path
 
+TIMEOUT_MSG = "SYSTEM: You timed out (3 min limit). You were taking too long. Delegate long-running tasks to a worker instead of doing them yourself. If this task truly cannot be delegated, you may continue now — but be quick."
+
 
 def _get_session_id(carbon_id):
     """Get session UUID for a specific carbon."""
@@ -253,7 +255,9 @@ def claude_code(text, carbon_id, on_tools=None):
             reply_user("Manager session not found – send a message to start a new one.", carbon_id)
             return '{"tools": [{"tool": "do_nothing"}]}', None, []
     except subprocess.TimeoutExpired:
-        return '{"tools": [{"tool": "reply", "message": "hold on, still working on this..."}, {"tool": "do_nothing"}]}', None, []
+        from core.telegram import reply_user
+        reply_user("hold on, still working on this...", carbon_id)
+        return TIMEOUT_MSG, None, []
     except Exception:
         pass
 
@@ -280,7 +284,9 @@ def claude_code(text, carbon_id, on_tools=None):
         rl = output if (output and _is_rate_limit(output)) else None
         return output, rl, []
     except subprocess.TimeoutExpired:
-        return '{"tools": [{"tool": "reply", "message": "hold on, still working on this..."}, {"tool": "do_nothing"}]}', None, []
+        from core.telegram import reply_user
+        reply_user("hold on, still working on this...", carbon_id)
+        return TIMEOUT_MSG, None, []
     except Exception as e:
         return f'{{"tools": [{{"tool": "reply", "message": "Manager error: {e}"}}, {{"tool": "do_nothing"}}]}}', None, []
 
