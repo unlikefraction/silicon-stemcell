@@ -411,16 +411,14 @@ def run_event_loop_tick():
 
 
 def _make_mid_stream_handler(carbon_id):
-    """Create a callback that executes tool JSON found in intermediate assistant texts.
-    Returns list of tool specs that executed successfully (for dedup)."""
+    """Create a callback that executes reply tools mid-stream for fast delivery.
+    Only reply is fire-and-forget. All other tools need their results fed back
+    to the manager, so they must go through the centralized executor."""
     def on_tools(tools_list):
         succeeded = []
         for tool_spec in tools_list:
             tool_name = tool_spec.get("tool", "")
-            if tool_name == "do_nothing":
-                continue
-            # Skip tools that need centralized handling
-            if tool_name in ("restart_silicon_service", "change_carbon_id"):
+            if tool_name != "reply":
                 continue
             result = execute_single_tool(tool_spec, carbon_id)
             if result:
