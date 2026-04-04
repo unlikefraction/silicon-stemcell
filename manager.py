@@ -59,7 +59,7 @@ def _is_rate_limit(text):
     """Check if text indicates an API rate limit."""
     lower = text.lower()
     return any(p in lower for p in [
-        "rate limit", "rate_limit", "usage limit",
+        "rate limit", "rate_limit", "usage limit", "hit your limit",
         "too many requests", "quota exceeded", "overloaded",
     ])
 
