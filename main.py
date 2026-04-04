@@ -12,7 +12,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from config import EVENT_LOOP, LOOP_TICK
-from manager import claude_code, parse_manager_output, new_session, _is_rate_limit
+from manager import claude_code, parse_manager_output, new_session, _is_rate_limit, TIMEOUT_MSG
 from core.telegram import reply_user, get_contacts
 from core.glass import ensure_known_silicon_contact
 from core.messages import send_manager_message
@@ -477,7 +477,7 @@ def run_all_managers(context_by_carbon):
                     continue
 
                 # Manager timed out — feed the timeout message back directly
-                if output and output.startswith("SYSTEM:"):
+                if output == TIMEOUT_MSG:
                     log(f"[Silicon] Manager timeout for {carbon_id}")
                     pending[carbon_id] = output
                     continue
