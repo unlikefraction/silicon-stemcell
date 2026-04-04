@@ -201,10 +201,8 @@ def execute_single_tool(tool_spec, carbon_id):
             contact, exists = ensure_known_silicon_contact(target_silicon_id)
             if not exists:
                 return f"Tool 'message_manager' (to {target_silicon_id}): Error: silicon_id does not exist on Glass"
-            # Send via Glass API (remote silicon), not local manager queue
-            from core.glass import send_silicon_message
-            send_silicon_message(target_silicon_id, body=message, kind="text")
-            return f"Tool 'message_manager' (to {target_silicon_id}): Message sent via Glass"
+            status = send_manager_message(carbon_id, target_silicon_id, message)
+            return f"Tool 'message_manager' (to {target_silicon_id}): {status}"
         except Exception as e:
             return f"Tool 'message_manager' (to {target_silicon_id}): Error: {e}"
 
