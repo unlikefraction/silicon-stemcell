@@ -14,7 +14,7 @@ STATE_FILE = PROJECT_ROOT / "core" / "glass_state.json"
 
 
 def _find_glass_config(start=None):
-    start = Path(start or Path.cwd()).resolve()
+    start = Path(start or PROJECT_ROOT).resolve()
     for candidate in [start, *start.parents]:
         path = candidate / CONFIG_FILE
         if path.exists():
