@@ -190,15 +190,59 @@ def send_silicon_message(target_username, *, body="", kind="text", attachment_pa
     return response.json()
 
 
+def _kind_from_extension(path):
+    """Map a file path's extension to a Glass message kind."""
+    from core.telegram import IMAGE_EXTS, VIDEO_EXTS, AUDIO_EXTS
+    import os
+    ext = os.path.splitext(path)[1].lower()
+    if ext in IMAGE_EXTS:
+        return "image"
+    if ext in VIDEO_EXTS:
+        return "video"
+    if ext in AUDIO_EXTS:
+        return "audio"
+    return "document"
+
+
 def reply_to_silicon_contact(contact, message, start=None):
     silicon_id = contact.get("silicon_id")
     if not silicon_id:
         return "Error: No silicon_id configured for this contact."
-    if "[file=" in message or "[voice=" in message:
-        return "Error: Glass silicon replies currently support plain text only."
     if not message.strip():
         return "Error: message is required"
-    send_silicon_message(silicon_id, body=message, kind="text", start=start)
+
+    from core.telegram import _parse_reply_segments, _text_to_speech
+    import os
+
+    segments = _parse_reply_segments(message)
+    errors = []
+
+    for seg_type, seg_value in segments:
+        try:
+            if seg_type == "text":
+                send_silicon_message(silicon_id, body=seg_value, kind="text", start=start)
+
+            elif seg_type == "file":
+                path = os.path.expanduser(seg_value.strip())
+                if not os.path.isabs(path):
+                    path = os.path.abspath(path)
+                if not os.path.exists(path):
+                    errors.append(f"File not found: {path}")
+                    continue
+                kind = _kind_from_extension(path)
+                send_silicon_message(silicon_id, body="", kind=kind, attachment_path=path, start=start)
+
+            elif seg_type == "voice":
+                ogg_path = _text_to_speech(seg_value)
+                if not ogg_path:
+                    errors.append(f"TTS failed for: {seg_value[:50]}")
+                    continue
+                send_silicon_message(silicon_id, body="", kind="audio", attachment_path=ogg_path, start=start)
+        except Exception as e:
+            errors.append(f"{seg_type} segment failed: {e}")
+
+    if errors:
+        return "Sent with errors: " + "; ".join(errors)
     return "Message sent"
 
 
