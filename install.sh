@@ -1142,6 +1142,38 @@ find_installation() {
     return 1
 }
 
+# Multi-target selector: "all", a number (1), or a comma list (1,2,4)
+_is_multi_target() {
+    local s="$1"
+    [ "$s" = "all" ] && return 0
+    [[ "$s" =~ ^[0-9]+(,[0-9]+)*$ ]] && return 0
+    return 1
+}
+
+# Resolve a multi-target selector to a newline-separated list of installation names.
+_resolve_targets() {
+    local selector="$1"
+    if [ "$selector" = "all" ]; then
+        get_installations | awk -F'|' '{print $2}'
+        return 0
+    fi
+    # Comma-separated 1-based indices
+    local IFS=','
+    for num in $selector; do
+        local want=$((num - 1))
+        get_installations | awk -F'|' -v w="$want" '$1 == w { print $2 }'
+    done
+}
+
+# Ask to confirm a multi-target action. $1=verb, $2=newline list of names.
+_confirm_multi() {
+    local verb="$1"
+    local names="$2"
+    local joined
+    joined=$(echo "$names" | paste -sd "," - | sed 's/,/, /g')
+    confirm "Are you sure you want to $verb the following silicons: $joined?"
+}
+
 # Pick an installation (interactive)
 pick_installation() {
     local count
@@ -1371,6 +1403,27 @@ _glass_agent_status() {
 
 cmd_start() {
     local target="$1"
+
+    # Multi-target dispatch
+    if [ -n "$target" ] && _is_multi_target "$target"; then
+        local names
+        names=$(_resolve_targets "$target")
+        [ -z "$names" ] && { error "No matching installations"; exit 1; }
+        if [ "$target" = "all" ]; then
+            _confirm_multi "start" "$names" || return
+        fi
+        while IFS= read -r n; do
+            [ -z "$n" ] && continue
+            _start_one "$n"
+        done <<< "$names"
+        return
+    fi
+
+    _start_one "$target"
+}
+
+_start_one() {
+    local target="$1"
     local inst
 
     if [ -n "$target" ]; then
@@ -1427,6 +1480,28 @@ cmd_stop() {
     elif [ "$2" = "--full" ] || [ "${ARG3:-}" = "--full" ]; then
         full_stop=true
     fi
+
+    # Multi-target dispatch
+    if [ -n "$target" ] && _is_multi_target "$target"; then
+        local names
+        names=$(_resolve_targets "$target")
+        [ -z "$names" ] && { error "No matching installations"; exit 1; }
+        if [ "$target" = "all" ]; then
+            _confirm_multi "stop" "$names" || return
+        fi
+        while IFS= read -r n; do
+            [ -z "$n" ] && continue
+            _stop_one "$n" "$full_stop"
+        done <<< "$names"
+        return
+    fi
+
+    _stop_one "$target" "$full_stop"
+}
+
+_stop_one() {
+    local target="$1"
+    local full_stop="$2"
 
     local inst
     if [ -n "$target" ]; then
@@ -1862,20 +1937,6 @@ cmd_update_script() {
 
 cmd_update_instance() {
     local target="$1"
-    local inst
-
-    if [ -n "$target" ]; then
-        inst=$(find_installation "$target") || { error "Silicon '$target' not found"; exit 1; }
-    else
-        inst=$(find_installation) || inst=$(pick_installation)
-    fi
-
-    IFS='|' read -r idx name path pid_file <<< "$inst"
-
-    if [ "$(is_running "$pid_file")" = "running" ]; then
-        error "'$name' is running. Stop it first with: silicon stop $name"
-        exit 1
-    fi
 
     ensure_git || warn "Proceeding without git. Some non-conflicting merges may be skipped."
 
@@ -1892,18 +1953,60 @@ cmd_update_instance() {
         exit 1
     fi
 
+    # Multi-target dispatch
+    if [ -n "$target" ] && _is_multi_target "$target"; then
+        local names
+        names=$(_resolve_targets "$target")
+        [ -z "$names" ] && { error "No matching installations"; exit 1; }
+        if [ "$target" = "all" ]; then
+            _confirm_multi "update" "$names" || return
+        fi
+        while IFS= read -r n; do
+            [ -z "$n" ] && continue
+            _update_one "$n" "$tmp_src" "$updater" multi || true
+        done <<< "$names"
+        return
+    fi
+
+    _update_one "$target" "$tmp_src" "$updater" single
+}
+
+_update_one() {
+    local target="$1"
+    local tmp_src="$2"
+    local updater="$3"
+    local mode="${4:-single}"
+    local inst
+
+    if [ -n "$target" ]; then
+        inst=$(find_installation "$target") || { error "Silicon '$target' not found"; [ "$mode" = "multi" ] && return 1 || exit 1; }
+    else
+        inst=$(find_installation) || inst=$(pick_installation)
+    fi
+
+    IFS='|' read -r idx name path pid_file <<< "$inst"
+
+    if [ "$(is_running "$pid_file")" = "running" ]; then
+        if [ "$mode" = "multi" ]; then
+            warn "Skipping '$name' — it is running. Stop it first with: silicon stop $name"
+            return 1
+        fi
+        error "'$name' is running. Stop it first with: silicon stop $name"
+        exit 1
+    fi
+
     info "Updating '$name' safely..."
     if "$PYTHON_CMD" "$updater" update --source "$tmp_src" --target "$path"; then
         success "'$name' updated successfully"
     else
         local status=$?
         if [ "$status" -eq 2 ]; then
-            error "Update aborted because merge conflicts were detected."
+            error "Update aborted because merge conflicts were detected in '$name'."
             info "No local files were overwritten."
         else
-            error "Update failed."
+            error "Update failed for '$name'."
         fi
-        exit "$status"
+        [ "$mode" = "multi" ] && return "$status" || exit "$status"
     fi
 }
 
@@ -2134,10 +2237,10 @@ cmd_help() {
     printf "  silicon                     Show status or list instances\n"
     printf "  silicon new                 Create a new Silicon (same as install)\n"
     printf "  silicon new .               Hydrate current folder into a runnable silicon\n"
-    printf "  silicon start [name]        Start a silicon instance (with auto-restart)\n"
-    printf "  silicon stop [name]         Stop a running instance (agent stays alive)\n"
-    printf "  silicon stop --full [name]  Stop instance and glass agent\n"
-    printf "  silicon restart [name]      Restart a silicon instance\n"
+    printf "  silicon start <target>      Start silicon(s). target = name, index, 1,2,4, or all\n"
+    printf "  silicon stop <target>       Stop silicon(s) (agent stays alive)\n"
+    printf "  silicon stop --full <target> Stop silicon(s) and glass agent\n"
+    printf "  silicon restart <target>    Restart silicon(s)\n"
     printf "  silicon agent <start|stop|status> [name]  Manage glass agent\n"
     printf "  silicon status [name]       Show instance status\n"
     printf "  silicon browser [name]      Open headed browser for login\n"
@@ -2147,7 +2250,7 @@ cmd_help() {
     printf "  silicon push [name]         Start hourly backup loop to Glass\n"
     printf "  silicon push [name] now     Push a one-time backup to Glass\n"
     printf "  silicon push [name] stop    Stop the hourly backup loop\n"
-    printf "  silicon update [name]       Update a silicon instance to latest without overwriting local changes\n"
+    printf "  silicon update <target>     Update silicon(s) to latest. target = name, index, 1,2,4, or all\n"
     printf "  silicon list                List all instances\n"
     printf "  silicon script update       Update the silicon CLI script\n"
     printf "  silicon install             Install a new instance\n"
