@@ -82,7 +82,41 @@ def _ensure_silicon_contact(silicon_id):
     return contacts_data, carbon_id, info, True
 
 
-def _message_preview(message):
+GLASS_MEDIA_DIR = PROJECT_ROOT / "core" / "glass_media"
+
+
+def _download_glass_attachment(message, config):
+    """Download an incoming Glass message attachment to a local path. Returns path or None."""
+    attachment_url = message.get("attachment_url") or ""
+    attachment_name = message.get("attachment_name") or ""
+    if not attachment_url:
+        return None
+
+    # Build absolute URL if the server returned a relative path
+    if attachment_url.startswith("/"):
+        attachment_url = config["server_url"].rstrip("/") + attachment_url
+
+    GLASS_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    import time as _time
+    timestamp = int(_time.time() * 1000)
+    safe_name = attachment_name or f"attachment_{message.get('id', timestamp)}"
+    # Prefix with timestamp to avoid collisions
+    local_path = GLASS_MEDIA_DIR / f"{timestamp}_{safe_name}"
+
+    try:
+        resp = requests.get(attachment_url, headers=_auth_headers(config), timeout=120, stream=True)
+        resp.raise_for_status()
+        with open(local_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=65536):
+                if chunk:
+                    f.write(chunk)
+        return str(local_path)
+    except Exception as e:
+        print(f"[Glass] Attachment download failed ({attachment_name}): {e}", flush=True)
+        return None
+
+
+def _message_preview(message, local_path=None):
     body = (message.get("body") or "").strip()
     kind = message.get("kind") or "text"
     attachment_name = message.get("attachment_name") or ""
@@ -91,10 +125,13 @@ def _message_preview(message):
         return body
 
     label = kind.capitalize()
-    if attachment_name:
-        preview = f"[{label} received: {attachment_name}]"
+    if local_path:
+        name_part = f": {attachment_name}" if attachment_name else ""
+        preview = f"[{label} received{name_part}] (@{local_path})"
+    elif attachment_name:
+        preview = f"[{label} received: {attachment_name}] (download failed)"
     else:
-        preview = f"[{label} received]"
+        preview = f"[{label} received] (download failed)"
     if body:
         preview += f"\n{body}"
     return preview
@@ -343,7 +380,10 @@ def get_unread_silicon_messages(start=None):
             reply_prefix = ""
             if message.get("reply_to"):
                 reply_prefix = f"(replying to message {message['reply_to']}) "
-            line = _message_preview(message)
+            local_path = None
+            if message.get("kind") and message.get("kind") != "text":
+                local_path = _download_glass_attachment(message, config)
+            line = _message_preview(message, local_path=local_path)
             if not line:
                 continue
             if timestamp:
