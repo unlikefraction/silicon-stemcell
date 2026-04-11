@@ -6,7 +6,7 @@ You can run any code, open any URL, interact with any web page, and do anything 
 
 Your browser session is pre-configured. Use `silicon-browser` commands directly via Bash -- do NOT pass `--session` or `--profile` flags manually.
 
-IMPORTANT: Do NOT call `silicon-browser close` when you are done. The browser session is managed by the system and will be reused by the next worker. Just finish your task and output your summary.
+IMPORTANT: Call `silicon-browser close` when you are done with the job. IT IS IMPORTANT to close the browser before replying back with the answer, so that other workers could use the browser and doesn't take too much system resources.
 
 Workflow: open a URL, take a snapshot to get element refs, interact using those refs, re-snapshot after any navigation or DOM change.
 
