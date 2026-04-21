@@ -50,8 +50,11 @@ On first run, Silicon will prompt you for the Telegram bot token and save it to 
 ```python
 # env.py
 TELEGRAM_BOT_TOKEN = "your-bot-token-here"
-OPENAI_API_KEY = "your-openai-key-here"  # for voice transcription & TTS
+OPENAI_API_KEY = "your-openai-key-here"  # for incoming voice transcription (Whisper)
+GEMINI_API_KEY = "your-gemini-key-here"  # for outgoing TTS (Gemini)
 ```
+
+For voice bubbles (`.ogg/opus`) on Telegram, install `ffmpeg` on your system. Without `ffmpeg`, voice messages fall back to `.wav` audio attachments.
 
 ### Run
 
@@ -101,7 +104,7 @@ This sends 5 messages in order:
 
 **Syntax:**
 - `[file=/absolute/path/to/anything]` — sends photo/video/audio/document (auto-detected by extension)
-- `[voice=text to speak out loud]` — converts to speech via OpenAI TTS, sent as Telegram voice bubble
+- `[voice=text to speak out loud]` — converts to speech via Gemini TTS, sent as Telegram voice bubble. Supports inline audio tags (`[laughs]`, `[whispers]`, `[annoyance]`, `[short pause]`, etc.) and an optional structured persona/scene/director's-notes/transcript format — see `prompts/MANAGER_TOOLS.md`.
 
 File types auto-detected:
 - `.jpg`, `.png`, `.gif`, `.webp` → photo

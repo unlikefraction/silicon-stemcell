@@ -356,13 +356,19 @@ if (-not $AlreadyConfigured) {
     }
 
     Write-Host ""
-    Write-Info "OpenAI API key (for voice transcription & TTS)."
-    Write-Info "Press Enter to skip – voice features will be disabled."
+    Write-Info "OpenAI API key (for incoming voice transcription via Whisper)."
+    Write-Info "Press Enter to skip – incoming voice transcription will be disabled."
     $OpenAIKey = Read-Secret "OpenAI API key (optional)"
+
+    Write-Host ""
+    Write-Info "Gemini API key (for outgoing text-to-speech)."
+    Write-Info "Press Enter to skip – outgoing voice messages will be disabled."
+    $GeminiKey = Read-Secret "Gemini API key (optional)"
 
     @"
 TELEGRAM_BOT_TOKEN = "$TelegramToken"
 OPENAI_API_KEY = "$OpenAIKey"
+GEMINI_API_KEY = "$GeminiKey"
 BROWSER_PROFILE = "$InstanceName"
 "@ | Set-Content $EnvFile -Encoding UTF8
 

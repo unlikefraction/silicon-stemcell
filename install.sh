@@ -544,13 +544,19 @@ if [ "$ALREADY_CONFIGURED" = "false" ]; then
     fi
 
     echo ""
-    info "OpenAI API key (for voice transcription & TTS)."
-    info "Press Enter to skip – voice features will be disabled."
+    info "OpenAI API key (for incoming voice transcription via Whisper)."
+    info "Press Enter to skip – incoming voice transcription will be disabled."
     OPENAI_KEY=$(read_secret "OpenAI API key (optional)")
+
+    echo ""
+    info "Gemini API key (for outgoing text-to-speech)."
+    info "Press Enter to skip – outgoing voice messages will be disabled."
+    GEMINI_KEY=$(read_secret "Gemini API key (optional)")
 
     cat > "$ENV_FILE" << ENVEOF
 TELEGRAM_BOT_TOKEN = "$TELEGRAM_TOKEN"
 OPENAI_API_KEY = "$OPENAI_KEY"
+GEMINI_API_KEY = "$GEMINI_KEY"
 BROWSER_PROFILE = "$INSTANCE_NAME"
 ENVEOF
 
@@ -985,6 +991,7 @@ lines = env_path.read_text().splitlines() if env_path.exists() else []
 required = {
     "TELEGRAM_BOT_TOKEN": "",
     "OPENAI_API_KEY": "",
+    "GEMINI_API_KEY": "",
     "BROWSER_PROFILE": "$instance_name",
 }
 seen = set()
@@ -1009,6 +1016,7 @@ PY
 
     local current_telegram=""
     local current_openai=""
+    local current_gemini=""
     if [ -f "$abs_target/env.py" ]; then
         python_capture_to current_telegram <<PY
 import pathlib, re
@@ -1020,6 +1028,12 @@ PY
 import pathlib, re
 text = pathlib.Path("$abs_target/env.py").read_text()
 m = re.search(r'^OPENAI_API_KEY\\s*=\\s*["\\'](.*)["\\']\\s*$', text, re.M)
+print(m.group(1) if m else "")
+PY
+        python_capture_to current_gemini <<PY
+import pathlib, re
+text = pathlib.Path("$abs_target/env.py").read_text()
+m = re.search(r'^GEMINI_API_KEY\\s*=\\s*["\\'](.*)["\\']\\s*$', text, re.M)
 print(m.group(1) if m else "")
 PY
     fi
@@ -1041,9 +1055,16 @@ PY
 
         if [ -z "$current_openai" ]; then
             echo ""
-            info "OpenAI API key (for voice transcription & TTS)."
-            info "Press Enter to skip – voice features will be disabled."
+            info "OpenAI API key (for incoming voice transcription via Whisper)."
+            info "Press Enter to skip – incoming voice transcription will be disabled."
             current_openai=$(read_secret "OpenAI API key (optional)")
+        fi
+
+        if [ -z "$current_gemini" ]; then
+            echo ""
+            info "Gemini API key (for outgoing text-to-speech)."
+            info "Press Enter to skip – outgoing voice messages will be disabled."
+            current_gemini=$(read_secret "Gemini API key (optional)")
         fi
 
         # ── Terminal worker preference (codex detection) ──
@@ -1088,6 +1109,7 @@ def upsert(text, key, value):
 
 text = upsert(text, "TELEGRAM_BOT_TOKEN", """$current_telegram""")
 text = upsert(text, "OPENAI_API_KEY", """$current_openai""")
+text = upsert(text, "GEMINI_API_KEY", """$current_gemini""")
 env_path.write_text(text.rstrip() + "\\n")
 PY
 

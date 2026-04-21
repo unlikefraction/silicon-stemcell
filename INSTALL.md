@@ -29,7 +29,8 @@ The installer will check for prerequisites, install what's missing (with your co
 ## What you'll need ready
 
 - **Telegram bot token** — create one via [@BotFather](https://t.me/BotFather) on Telegram
-- **OpenAI API key** (optional) — for voice message transcription & TTS
+- **OpenAI API key** (optional) — for incoming voice message transcription (Whisper)
+- **Gemini API key** (optional) — for outgoing text-to-speech (Gemini TTS)
 
 ---
 

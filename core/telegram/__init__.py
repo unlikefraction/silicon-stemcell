@@ -1,11 +1,15 @@
 import os
 import json
+import mimetypes
 import re
+import shutil
+import struct
+import subprocess
 import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import requests
-from core.telegram.config import BOT_TOKEN, API_BASE, FILE_API_BASE, CONTACTS_FILE, MEDIA_DIR, OPENAI_KEY
+from core.telegram.config import BOT_TOKEN, API_BASE, FILE_API_BASE, CONTACTS_FILE, MEDIA_DIR, OPENAI_KEY, GEMINI_KEY
 
 VALID_TRUST_LEVELS = ["very_low", "low", "ok", "high", "very_high", "ultimate"]
 
@@ -218,36 +222,138 @@ def _process_media(msg):
 
 # --- Outgoing: TTS and file sending ---
 
-def _text_to_speech(text):
-    """Convert text to speech using OpenAI TTS. Returns path to .ogg file or None."""
-    if not OPENAI_KEY:
+def _parse_audio_mime_type(mime_type):
+    bits_per_sample = 16
+    rate = 24000
+    for param in mime_type.split(";"):
+        param = param.strip()
+        if param.lower().startswith("rate="):
+            try:
+                rate = int(param.split("=", 1)[1])
+            except (ValueError, IndexError):
+                pass
+        elif param.startswith("audio/L"):
+            try:
+                bits_per_sample = int(param.split("L", 1)[1])
+            except (ValueError, IndexError):
+                pass
+    return bits_per_sample, rate
+
+
+def _pcm_to_wav(audio_data, mime_type):
+    bits_per_sample, sample_rate = _parse_audio_mime_type(mime_type)
+    num_channels = 1
+    data_size = len(audio_data)
+    bytes_per_sample = bits_per_sample // 8
+    block_align = num_channels * bytes_per_sample
+    byte_rate = sample_rate * block_align
+    chunk_size = 36 + data_size
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF", chunk_size, b"WAVE", b"fmt ", 16, 1,
+        num_channels, sample_rate, byte_rate, block_align,
+        bits_per_sample, b"data", data_size,
+    )
+    return header + audio_data
+
+
+def _wav_to_ogg_opus(wav_path):
+    """Convert a .wav to .ogg (opus) using ffmpeg. Returns ogg path or None if ffmpeg unavailable."""
+    if not shutil.which("ffmpeg"):
         return None
+    ogg_path = os.path.splitext(wav_path)[0] + ".ogg"
     try:
-        resp = requests.post(
-            "https://api.openai.com/v1/audio/speech",
-            headers={
-                "Authorization": f"Bearer {OPENAI_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "tts-1",
-                "input": text,
-                "voice": "alloy",
-                "response_format": "opus",
-            },
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", wav_path, "-c:a", "libopus", "-b:a", "32k", ogg_path],
+            capture_output=True,
             timeout=60,
         )
-        if resp.status_code == 200:
-            tts_dir = os.path.join(MEDIA_DIR, "tts")
-            os.makedirs(tts_dir, exist_ok=True)
-            timestamp = int(time.time() * 1000)
-            path = os.path.join(tts_dir, f"tts_{timestamp}.ogg")
-            with open(path, "wb") as f:
-                f.write(resp.content)
-            return path
+        if result.returncode == 0 and os.path.exists(ogg_path):
+            return ogg_path
+    except Exception as e:
+        print(f"[Telegram] ffmpeg conversion error: {e}", flush=True)
+    return None
+
+
+def _text_to_speech(prompt, voice_name="Puck"):
+    """Convert a structured TTS prompt to speech using Gemini TTS.
+    Returns path to .ogg (preferred) or .wav file, or None on failure."""
+    if not GEMINI_KEY:
+        return None
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError:
+        print("[Telegram] TTS error: google-genai not installed. Run: pip install google-genai", flush=True)
+        return None
+
+    try:
+        client = genai.Client(api_key=GEMINI_KEY)
+        contents = [
+            types.Content(
+                role="user",
+                parts=[types.Part.from_text(text=prompt)],
+            ),
+        ]
+        config = types.GenerateContentConfig(
+            temperature=1,
+            response_modalities=["audio"],
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice_name)
+                )
+            ),
+        )
+
+        tts_dir = os.path.join(MEDIA_DIR, "tts")
+        os.makedirs(tts_dir, exist_ok=True)
+        timestamp = int(time.time() * 1000)
+
+        audio_chunks = []
+        mime_type = None
+        for chunk in client.models.generate_content_stream(
+            model="gemini-3.1-flash-tts-preview",
+            contents=contents,
+            config=config,
+        ):
+            if chunk.parts is None:
+                continue
+            inline = chunk.parts[0].inline_data
+            if inline and inline.data:
+                audio_chunks.append(inline.data)
+                if mime_type is None:
+                    mime_type = inline.mime_type
+
+        if not audio_chunks:
+            print("[Telegram] TTS error: no audio data returned", flush=True)
+            return None
+
+        audio_data = b"".join(audio_chunks)
+        ext = mimetypes.guess_extension(mime_type or "") if mime_type else None
+
+        if ext and ext != ".wav":
+            out_path = os.path.join(tts_dir, f"tts_{timestamp}{ext}")
+            with open(out_path, "wb") as f:
+                f.write(audio_data)
+        else:
+            wav_bytes = _pcm_to_wav(audio_data, mime_type or "audio/L16;rate=24000")
+            out_path = os.path.join(tts_dir, f"tts_{timestamp}.wav")
+            with open(out_path, "wb") as f:
+                f.write(wav_bytes)
+
+        if out_path.endswith(".wav"):
+            ogg_path = _wav_to_ogg_opus(out_path)
+            if ogg_path:
+                try:
+                    os.remove(out_path)
+                except Exception:
+                    pass
+                return ogg_path
+            print("[Telegram] ffmpeg not found — sending .wav as audio file (install ffmpeg for voice bubbles).", flush=True)
+        return out_path
     except Exception as e:
         print(f"[Telegram] TTS error: {e}", flush=True)
-    return None
+        return None
 
 
 def _send_file_to_chat(chat_id, path):
@@ -517,9 +623,12 @@ def reply_user(message, carbon_id, parse_mode=None):
                 errors.append(status)
 
         elif seg_type == "voice":
-            ogg_path = _text_to_speech(seg_value)
-            if ogg_path:
-                status = _send_voice_to_chat(chat_id, ogg_path)
+            tts_path = _text_to_speech(seg_value)
+            if tts_path:
+                if tts_path.lower().endswith(".ogg"):
+                    status = _send_voice_to_chat(chat_id, tts_path)
+                else:
+                    status = _send_file_to_chat(chat_id, tts_path)
                 if "Error" in status:
                     errors.append(status)
             else:

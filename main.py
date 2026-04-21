@@ -40,8 +40,8 @@ def log(msg):
 # --- Bot token check ---
 
 def _ensure_env():
-    """If Telegram bot token is not configured, prompt for it and OpenAI key. Restart after."""
-    from env import TELEGRAM_BOT_TOKEN, OPENAI_API_KEY
+    """If Telegram bot token is not configured, prompt for it plus OpenAI and Gemini keys. Restart after."""
+    from env import TELEGRAM_BOT_TOKEN, OPENAI_API_KEY, GEMINI_API_KEY
 
     if TELEGRAM_BOT_TOKEN:
         return
@@ -56,14 +56,20 @@ def _ensure_env():
         sys.exit(1)
 
     log("")
-    log("[Silicon] OpenAI API key (for voice message transcription & text-to-speech).")
-    log("[Silicon] Press Enter to skip — voice features will be disabled.")
+    log("[Silicon] OpenAI API key (for voice message transcription via Whisper).")
+    log("[Silicon] Press Enter to skip — incoming voice transcription will be disabled.")
     openai_key = input("[Silicon] OpenAI API key: ").strip()
+
+    log("")
+    log("[Silicon] Gemini API key (for text-to-speech).")
+    log("[Silicon] Press Enter to skip — outgoing voice messages will be disabled.")
+    gemini_key = input("[Silicon] Gemini API key: ").strip()
 
     env_path = os.path.join(PROJECT_ROOT, "env.py")
     with open(env_path, "w") as f:
         f.write(f'TELEGRAM_BOT_TOKEN = "{token}"\n')
         f.write(f'OPENAI_API_KEY = "{openai_key}"\n')
+        f.write(f'GEMINI_API_KEY = "{gemini_key}"\n')
 
     log("[Silicon] Saved to env.py. Restarting...")
     os.execv(sys.executable, [sys.executable, "-u"] + sys.argv)

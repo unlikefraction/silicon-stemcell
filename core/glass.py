@@ -270,11 +270,11 @@ def reply_to_silicon_contact(contact, message, start=None):
                 send_silicon_message(silicon_id, body="", kind=kind, attachment_path=path, start=start)
 
             elif seg_type == "voice":
-                ogg_path = _text_to_speech(seg_value)
-                if not ogg_path:
+                tts_path = _text_to_speech(seg_value)
+                if not tts_path:
                     errors.append(f"TTS failed for: {seg_value[:50]}")
                     continue
-                send_silicon_message(silicon_id, body="", kind="audio", attachment_path=ogg_path, start=start)
+                send_silicon_message(silicon_id, body="", kind="audio", attachment_path=tts_path, start=start)
         except Exception as e:
             errors.append(f"{seg_type} segment failed: {e}")
 
