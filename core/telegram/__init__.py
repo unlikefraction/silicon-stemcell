@@ -17,7 +17,9 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 VIDEO_EXTS = {".mp4", ".avi", ".mkv", ".mov", ".webm", ".m4v"}
 AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".flac", ".aac", ".ogg", ".wma"}
 
-RICH_MEDIA_RE = re.compile(r'\[(file|voice)=(.+?)\]')
+# Matches [file=...] and [voice=...], allowing nested [tag] pairs inside the value
+# (needed for inline audio tags like [awe], [short pause] inside voice prompts).
+RICH_MEDIA_RE = re.compile(r'\[(file|voice)=((?:[^\[\]]|\[[^\]]*\])*)\]', re.DOTALL)
 
 
 def _load_contacts():
